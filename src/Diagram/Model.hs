@@ -143,14 +143,6 @@ emptyFromParent num (Term (Weight pNum denom _) pCoef _) =
     weight = weightFromRatio num denom
     coef = pCoef & coefClaims .~ IM.empty
 
--- data Count = Count {
---   _countSubject :: !Int, -- ^ the context symbol (`s0`)
---   _subjectCount :: !Int, -- ^ times the context appears (denom.) (`n0`)
---   _countObject  :: !Int, -- ^ the observed symbol (`s1`)
---   _objectCount  :: !Int  -- ^ times the symbol appears in this context
---                          -- (numerator) (`n01`)
--- } deriving (Show)
-
 -- | Check if a term claims a symbol
 claims :: Term -> Int -> Bool
 claims = flip IM.member . (^.termCoef.coefClaims)
@@ -159,8 +151,6 @@ claims = flip IM.member . (^.termCoef.coefClaims)
 -- TRIE --
 ----------
 
--- TODO: O(nlog(n)) but could be O(n) now that we have access to Trie
--- constructors
 checkTrie :: ContextTrie -> a -> a
 checkTrie ctxs = foldr ((.) . checkLineageOf) id $
                  Trie.keys ctxs
@@ -205,8 +195,7 @@ type ContextTrie = Trie (Maybe Int, Term) -- Nothing iff root/top Term
 data Model m = Model {
   _modelRules    :: !(Rules m), -- inv construction rules
   _modelCtxKeys  :: !(BoxedVec m ByteString), -- rev-extensions
-  _modelContexts :: !ContextTrie, -- suffix trie :: revExt -> (s, Term)
-  _modelTargets  :: !(Trie Int) -- prefix trie :: ext -> s
+  _modelContexts :: !ContextTrie -- suffix trie :: revExt -> (s, Term)
 }
 makeLenses ''Model
 
@@ -226,9 +215,8 @@ singleton im = do
 
       ctxs = assert (root^.termWeight.weightNum == 1 || IM.null im)
              Trie.fromList $ (BS.empty, (Nothing, root)) : ts
-      tgts = fromJust . fst <$> Trie.delete BS.empty ctxs
 
-  return $ Model rs cks ctxs tgts
+  return $ Model rs cks ctxs
 
 -- | Sum up the terms, giving the information content (nats) of the
 -- whole string w.r.t. the model
@@ -239,18 +227,7 @@ revExtension :: PrimMonad m => Model m -> Int -> Stream (Of Word8) m ()
 revExtension = effect . fmap (S.each . BS.unpack) .: ctxKey
 
 ctxKey :: PrimMonad m => Model m -> Int -> m ByteString
-ctxKey (Model _ ctxKeys _ _) = DMV.read ctxKeys
-
--- -- | Reverse extension of a symbol w.r.t. construction rules
--- revBytes :: forall m. PrimMonad m => Rules m -> Int -> m [Word8]
--- revBytes rs = go
---   where
---     go :: Int -> m [Word8]
---     go s = R.invLookup s rs >>=
---       \case Nothing -> assert (s < 256) $ return [toEnum s]
---             Just (s0,s1) -> do e1 <- go s1
---                                e0 <- go s0
---                                return $ e1 ++ e0
+ctxKey (Model _ ctxKeys _) = DMV.read ctxKeys
 
 ----------------------
 -- PATTERN MATCHING --
@@ -263,7 +240,7 @@ ctxKey (Model _ ctxKeys _ _) = DMV.read ctxKeys
 -- components of a joint symbol s. Returns matched pattern in reverse
 -- (back to normal orientation) (fst) and remainder of the list (snd).
 cMatchRev :: PrimMonad m => Model m -> Int -> [Int] -> m (Maybe ([Int], [Int]))
-cMatchRev (Model rs _ _ _) = flip go []
+cMatchRev (Model rs _ _) = flip go []
   where
     go _ _ [] = return Nothing
     go s1 cPref1 (s:rest)
@@ -278,7 +255,7 @@ cMatchRev (Model rs _ _ _) = flip go []
 -- between the extensions of the given symbols. Return the remaining
 -- rev-extension of the rev-list of symbols if the match is successful.
 eMatchRev :: PrimMonad m => Model m -> Int -> [Int] -> m (Maybe (Stream (Of Word8) m ()))
-eMatchRev mdl@(Model _ ctxKeys _ _) s0 str = do
+eMatchRev mdl@(Model _ ctxKeys _) s0 str = do
   bs <- DMV.read ctxKeys s0
   ffmap snd $ -- m, Maybe
     S.eq (S.each $ BS.unpack bs) $
@@ -288,11 +265,6 @@ eMatchRev mdl@(Model _ ctxKeys _ _) s0 str = do
 
 cResolveFwd :: PrimMonad m => Model m -> [Int] -> m [Int]
 cResolveFwd = undefined -- FIXME: TODO
-
--- | Given a model and a stream of atoms, return all the symbols (atomic
--- and constructed) whose extension matches the head of the stream
-eResolveFwd :: PrimMonad m => Model m -> Stream (Of Word8) m r -> m [Int]
-eResolveFwd = fmap snd3 .: Trie.resolveGeneric BS.empty . _modelTargets
 
 -- | Given a model and a stream of atoms, return all the symbols (atomic
 -- or constructed) whose reversed extension matches the head of the
@@ -316,7 +288,7 @@ resolveCtx = fmap snd3 .: Trie.resolveGeneric BS.empty . _modelContexts
 -- large to small, from itself to its first atom) appear
 insert :: PrimMonad m => (Int,Int) -> IntMap Int -> Model m ->
           m (Double, Int, Model m)
-insert (s0,s1) im mdl@(Model rs ctxKeys ctxTrie tgtTrie) = do
+insert (s0,s1) im mdl@(Model rs ctxKeys ctxTrie) = do
   ctx0 <- ctxKey mdl s0 -- rev-extension of s3
 
   -- 1) remove counts from e-suffixes of s0 to c-prefixes of s1 -----------
@@ -364,12 +336,9 @@ insert (s0,s1) im mdl@(Model rs ctxKeys ctxTrie tgtTrie) = do
       (ctxTrie', deltas) = L.mapAccumR (swap .: (&)) ctxTrie $
                            addTerm : addInter : subIntra ++ subInter
 
-      tgt01 = BS.reverse ctx01
-      tgtTrie' = Trie.insert tgt01 s01 tgtTrie -- tgt01 -> s01
-
   return (sum deltas, -- loss
           s01, -- new symbol
-          Model rs' ctxKeys' ctxTrie' tgtTrie') -- updated model
+          Model rs' ctxKeys' ctxTrie') -- updated model
   where
     -- | Given a context as a ByteString, a symbol predicted and a
     -- count, lookup the term claiming that symbol and subtract the
