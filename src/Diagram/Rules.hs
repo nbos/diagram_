@@ -1,177 +1,105 @@
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 -- | Construction rules
 module Diagram.Rules (module Diagram.Rules) where
 
 import Prelude hiding (length)
-import Control.Monad (foldM)
-import Control.Monad.Primitive (PrimMonad)
 import Control.Exception (assert)
 
-import Streaming
-import qualified Streaming.Prelude as S
-
 import Data.Word (Word8)
--- import Data.Maybe (catMaybes)
--- import Data.IntMap.Strict (IntMap)
--- import qualified Data.IntMap.Strict as IM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
+import qualified Data.Vector.Unboxed as U
+import qualified Data.Vector.Generic as V
 
-import Diagram.Dynamic (UnboxedVec, PrimitiveVec)
-import qualified Diagram.Dynamic as DMV
 import Diagram.Util
 
--- | Construction rules with O(1) push and lookup inside a PrimMonad `m`
-data Rules m = Rules {
-  -- -- | Construction rules indexed by the first symbol
-  -- rulesByFst :: !(BoxedVec m (IntMap Int)), -- s0 -> s1 -> s01
-  -- -- | Construction rules indexed by the second symbol
-  -- rulesBySnd :: !(BoxedVec m (IntMap Int)), -- s1 -> s0 -> s01
+newtype Rules = Rules {
   -- | Self-referrential vector of recipes for the construction of all
   -- symbols above 256 indexed at s-256
-  invRules   :: !(UnboxedVec m (Int,Int)), -- s01 -> (s0,s1)
-  -- | Memoized vector of lengths, otherwise, it's O(len)
-  symbolLengths :: !(PrimitiveVec m Int)
+  invRules :: U.Vector (Int,Int) -- s01 -> (s0,s1)
 }
 
 -- | New empty rule set
-new :: PrimMonad m => m (Rules m)
-new = do
-  -- byFst <- DMV.replicate 256 IM.empty
-  -- bySnd <- DMV.replicate 256 IM.empty
-  inv <- DMV.new
-  Rules inv <$> DMV.new
+empty :: Rules
+empty = Rules U.empty
 
 -- | Number of rules
-size :: Rules m -> Int
-size = DMV.dynLength . invRules
+size :: Rules -> Int
+size = V.length . invRules
 
 -- | Number of defined symbols
-numSymbols :: Rules m -> Int
+numSymbols :: Rules -> Int
 numSymbols = (256 +) . size
 
 -- | Compute the length of a symbol
-symbolLength :: PrimMonad m => Rules m -> Int -> m Int
-symbolLength rs s
-  | s < 256   = return 1
-  | otherwise = DMV.read (symbolLengths rs) (s - 256) -- go
-  -- where go s = invLookup s rs >>= \case
-  --         Nothing -> assert (s < 256) $ return 1
-  --         Just (s0,s1) -> do
-  --           pre <- go s0
-  --           suf <- go s1
-  --           return $ pre + suf
+symbolLength :: Rules -> Int -> Int
+symbolLength (Rules irs) = go
+  where
+    go s | s < 256   = 1
+         | otherwise = let (s0,s1) = irs V.! (s - 256)
+                       in go s0 + go s1
 
-fromList :: PrimMonad m => [(Int,Int)] -> m (Rules m)
-fromList l = do
-  rs <- new
-  foldM (fmap snd .: flip push) rs l
-
--- -- | Deconstruct a symbol back into a list of atoms/byte string
--- extension :: PrimMonad m => Rules m -> Int -> m [Int]
--- extension rs = go
---   where go s = invLookup s rs >>= \case
---           Nothing -> assert (s < 256) $ return [s]
---           Just (s0,s1) -> do
---             pre <- go s0
---             suf <- go s1
---             return $ pre ++ suf
-
--- | List the symbols that are prefixes of the given symbol, from large
--- to small, starting with the symbol itself and ending with the first
--- atomic symbol of its extension
-prefixes :: PrimMonad m => Rules m -> Int -> m [Int]
-prefixes rs = go
-  where go s = invLookup s rs >>= \case
-          Nothing -> assert (s < 256) $ return [s]
-          Just (s0,_) -> (s:) <$> go s0
-
--- | List the symbols that are suffixes of the given symbol, from large
--- to small, starting with the symbol itself and ending with the last
--- atomic symbol of its extension
-suffixes :: PrimMonad m => Rules m -> Int -> m [Int]
-suffixes rs = go
-  where go s = invLookup s rs >>= \case
-          Nothing -> assert (s < 256) $ return [s]
-          Just (_,s1) -> (s:) <$> go s1
-
--- | Resolve the symbol back into a string of chars
-toString :: PrimMonad m => Rules m -> Int -> m String
-toString = fmap (UTF8.toString
-                 . BS.pack
-                 . fmap fromIntegral)
-           . S.toList_
-           .: extension
+fromList :: [(Int, Int)] -> Rules
+fromList = Rules . U.fromList
 
 -- | Add a new symbol with a construction rule. Returns updated rules
--- and index of new symbol.
-push :: PrimMonad m => (Int,Int) -> Rules m -> m (Int, Rules m)
-push s0s1@(s0,_) rs@(Rules inv lengths) =
-  assert (both (< numSymbols rs) s0s1) $ do
-  -- s0's and s1's
-  let s01 = numSymbols rs
-  -- DMV.modify byFst (IM.insert s1 s01) s0 -- s0 -> s1 -> s01
-  -- DMV.modify bySnd (IM.insert s0 s01) s1 -- s1 -> s0 -> s01
-
-  -- initialize s01's values
-  -- byFst' <- DMV.push byFst IM.empty -- (s01,{}) -> {}
-  -- bySnd' <- DMV.push bySnd IM.empty -- ({},s01) -> {}
-  inv' <- DMV.push inv s0s1     -- (s0, s1) -> s01
-
-  l0 <- symbolLength rs s0
-  l1 <- symbolLength rs s0
-  lengths' <- DMV.push lengths (l0 + l1)
-
-  return (s01, Rules inv' lengths')
-
--- -- | Lookup construction rules where the given symbol is the first part
--- -- (prefix)
--- withAsFst :: PrimMonad m => Rules m -> Int -> m (IntMap Int)
--- withAsFst = DMV.read . rulesByFst
-  
--- -- | Lookup construction rules where the given symbol is the second part
--- -- (suffix)
--- withAsSnd :: PrimMonad m => Rules m -> Int -> m (IntMap Int)
--- withAsSnd = DMV.read . rulesBySnd
+-- and index of new symbol. O(n)
+push :: (Int, Int) -> Rules -> (Int, Rules)
+push s0s1 rs@(Rules irs) = assert (both (< s01) s0s1)
+                           (s01, Rules $ V.snoc irs s0s1)
+  where s01 = numSymbols rs
 
 -- | Lookup the rule for constructing a given symbol
-(<!) :: PrimMonad m => Rules m -> Int -> m (Int,Int)
-(<!) rs = DMV.read (invRules rs) . (+) (-256)
-infixl 9 <!
+(!) :: Rules -> Int -> (Int,Int)
+(!) (Rules irs) s = irs V.! (s - 256)
+infixl 9 !
 
 -- | Lookup the rule for constructing a given symbol. Nothing returned
 -- if the given symbol is atomic (<256) or not yet defined
-(<!?) :: PrimMonad m => Rules m -> Int -> m (Maybe (Int,Int))
-(<!?) rs = DMV.readMaybe (invRules rs) . (+) (-256)
-infixl 9 <!?
+invLookup :: Int -> Rules -> Maybe (Int,Int)
+invLookup s rs | s < 256   = Nothing
+               | otherwise = Just $ rs ! s
 
--- | Lookup the rule for constructing a given symbol. Nothing returned
--- if the given symbol is atomic (<256) or not yet defined
-invLookup :: PrimMonad m => Int -> Rules m -> m (Maybe (Int,Int))
-invLookup = flip (<!?)
-
-extensionGeneric :: PrimMonad m => (forall a b. (a -> a -> b) -> a -> a -> b) ->
-                    Rules m -> Int -> Stream (Of Word8) m ()
-extensionGeneric comb rs = go
+-- | Deconstruct a symbol back into a list of bytes
+extension :: Rules -> Int -> [Word8]
+extension (Rules irs) = go
   where
-    go s = lift (invLookup s rs) >>=
-      \case Nothing -> assert (s >= 0 && s < 256)
-                       S.yield $ toEnum s
-            Just (s0,s1) -> comb (>>) (go s0) (go s1)
-{-# INLINE extensionGeneric #-}
+    go s | s < 256 = [toEnum s]
+         | otherwise = let (s0,s1) = irs V.! (s - 256)
+                       in go s0 ++ go s1
 
-extension :: PrimMonad m => Rules m -> Int -> Stream (Of Word8) m ()
-extension = extensionGeneric id
+-- | List the symbols that are constructive prefixes of the given
+-- symbol, from large to small, starting with the symbol itself and
+-- ending with the first atomic symbol of its extension
+cPrefixes :: Rules -> Int -> [Int]
+cPrefixes (Rules irs) = go
+  where
+    go s | s < 256 = [s]
+         | otherwise = let (s0,_) = irs V.! (s - 256)
+                       in s : go s0
 
-revExtension :: PrimMonad m => Rules m -> Int -> Stream (Of Word8) m ()
-revExtension = extensionGeneric flip
+-- | List the symbols that are constructive suffixes of the given
+-- symbol, from large to small, starting with the symbol itself and
+-- ending with the last atomic symbol of its extension
+cSuffixes :: Rules -> Int -> [Int]
+cSuffixes (Rules irs) = go
+  where
+    go s | s < 256 = [s]
+         | otherwise = let (_,s1) = irs V.! (s - 256)
+                       in s : go s1
+
+-- | Resolve the symbol back into a string of chars
+toString :: Rules -> Int -> String
+toString = UTF8.toString
+           . BS.pack
+           . fmap fromIntegral
+           .: extension
 
 -- resolveGeneric :: forall m. PrimMonad m =>
 --                   (forall a b. (a -> a -> b) -> a -> a -> b) ->
---                   (Rules m -> Int -> m (IntMap Int)) ->
---                   Rules m -> [Int] -> m [Int]
+--                   (Rules -> Int -> (IntMap Int)) ->
+--                   Rules -> [Int] -> [Int]
 -- resolveGeneric _ _ _ [] = return []
 -- resolveGeneric comb withAsFstFn rs (a0:atoms) = go a0 atoms
 --   where
@@ -186,12 +114,12 @@ revExtension = extensionGeneric flip
 
 --     -- | check a symbol's extension against the atom string, returning
 --     -- remaining atoms if they match
---     againstAtoms :: (Int, res) -> [Int] -> m (Maybe (res, [Int]))
+--     againstAtoms :: (Int, res) -> [Int] -> (Maybe (res, [Int]))
 --     againstAtoms (s1,res) as = (res,)
 --       <<$>> goMatch (extensionGeneric comb rs s1) as
 
 --     -- | onlyIfMatch's rec helper
---     goMatch :: Stream (Of Int) m r -> [Int] -> m (Maybe [Int])
+--     goMatch :: Stream (Of Int) m r -> [Int] -> (Maybe [Int])
 --     goMatch str as = S.uncons str >>=
 --       \case Nothing -> return $ Just as -- end of extension
 --             Just (s,str') -> case as of
@@ -202,11 +130,11 @@ revExtension = extensionGeneric flip
 
 -- -- | Construct all possible symbols at the head of the given string of
 -- -- symbols
--- resolvePrefixes :: PrimMonad m => Rules m -> [Int] -> m [Int]
+-- resolvePrefixes :: Rules -> [Int] -> [Int]
 -- resolvePrefixes = resolveGeneric id withAsFst
 
 -- -- | Construct all possible symbols at the head of a reversed list of
 -- -- symbols (i.e. all symbols that end at the tail of the reverse of the
 -- -- input list)
--- resolveSuffixes :: PrimMonad m => Rules m -> [Int] -> m [Int]
+-- resolveSuffixes :: Rules -> [Int] -> [Int]
 -- resolveSuffixes = resolveGeneric flip withAsSnd
