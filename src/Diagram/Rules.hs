@@ -24,7 +24,7 @@ data Rules = Rules {
   -- symbols above 256 indexed at s-256
   invRules :: !(U.Vector (Int,Int)), -- s01 -> (s0,s1)
   sufChildren :: !(B.Vector [Int]) -- s1 -> [s01]
-}
+} deriving (Show)
 
 -- | New empty rule set
 empty :: Rules
@@ -75,14 +75,14 @@ infixl 9 !
 
 -- | Lookup the rule for constructing a given symbol. Nothing returned
 -- if the given symbol is atomic (<256) or not yet defined
-invLookup :: Int -> Rules -> Maybe (Int,Int)
-invLookup s rs | s < 256   = Nothing
+invLookup :: Rules -> Int -> Maybe (Int,Int)
+invLookup rs s | s < 256   = Nothing
                | otherwise = Just $ rs ! s
 
 -- | Return all symbols that have the given symbols as a right symbol
 -- (s1) in an unspecified order (reverse symbol index as value for now)
-sChildren :: Int -> Rules -> [Int]
-sChildren s (Rules _ scs)= scs V.! s
+sChildren :: Rules -> Int -> [Int]
+sChildren (Rules _ scs) s = scs V.! s
 
 -- | Deconstruct a symbol back into a list of bytes
 extension :: Rules -> Int -> [Word8]

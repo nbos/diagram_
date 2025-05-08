@@ -1,39 +1,26 @@
 {-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase, TupleSections #-}
+{-# LANGUAGE RankNTypes, ScopedTypeVariables #-}
 module Diagram.Model (module Diagram.Model) where
 
-import Control.Lens hiding ((:>))
+import Control.Lens
 import Control.Exception (assert)
-import Control.Monad.Primitive (PrimMonad)
+import Control.Monad.ST
 import Control.Monad
 
-import Data.Word
+import Data.STRef
 import Data.Maybe
-import Data.Monoid
-import Data.Tuple.Extra
 import qualified Data.List as L
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 
 import Numeric.SpecFunctions (logFactorial)
-import Numeric.MathFunctions.Comparison
+import Numeric.MathFunctions.Comparison (within, ulpDistance)
 
-import Streaming hiding (Sum,first)
-import qualified Streaming.Prelude as S
-import qualified Diagram.Streaming as S
+import qualified Data.Vector as B
+import qualified Data.Vector.Generic as V
+import qualified Data.Vector.Generic.Mutable as MV
 
-import Data.Trie (Trie(..))
-import qualified Data.Trie as Trie
-import qualified Data.Trie.Internal as Trie
-import qualified Diagram.Trie as Trie
-
-import Diagram.Dynamic (BoxedVec)
-import qualified Diagram.Dynamic as DMV
 import Diagram.Rules (Rules)
 import qualified Diagram.Rules as R
 import Diagram.Util
@@ -117,8 +104,8 @@ checkTerm t@(Term weight@(Weight _ denom w) coef@(Coef total _ lc) res)
   | otherwise = checkCoef coef . checkWeight weight
 
 -- | Construct a root Term from a map of counts
-rootTerm :: IntMap Int -> Term
-rootTerm counts | total > 0 = Term weight coef $ coef^.coefLog
+fromCounts :: IntMap Int -> Term
+fromCounts counts | total > 0 = Term weight coef $ coef^.coefLog
                 | otherwise = Term zeroWeight zeroCoef 0.0
   where coef = rootCoef counts
         total = coef^.coefTotal
@@ -147,25 +134,52 @@ emptyFromParent num (Term (Weight pNum denom _) pCoef _) =
 claims :: Term -> Int -> Bool
 claims = flip IM.member . (^.termCoef.coefClaims)
 
-----------
--- TRIE --
-----------
+-----------
+-- MODEL --
+-----------
 
-checkTrie :: ContextTrie -> a -> a
-checkTrie ctxs = foldr ((.) . checkLineageOf) id $
-                 Trie.keys ctxs
+type Model = ModelT Term (B.Vector Term) -- immutable
+type MModel s = ModelT (STRef s Term) (B.MVector s Term) -- mutable
+
+-- | A model is a set of contexts (ordered by rev-suffix) with frequency
+-- counts that are inherited and otherwise deviate only by each
+-- context's own claims to certain counts of certain symbols
+data ModelT r v = Model {
+  _constrRules :: !Rules, -- symbols of the model
+  _rootTerm    :: !r,     -- term of the empty construction
+  _symbolTerms :: !v      -- term for each symbol
+} deriving (Show)
+makeLenses ''ModelT
+
+-- | Construct a 0-gram model from the counts of the symbols in the
+-- data, which corresponds to a single term for the distribution in
+-- the empty context
+singleton :: IntMap Int -> Model
+singleton im = assert (root^.termWeight.weightNum == 1 || IM.null im)
+               Model R.empty root $ B.fromList ts
   where
-    checkLineageOf :: ByteString -> a -> a
-    checkLineageOf bs = -- check lineage starting w/ root
-      let lineage = fmap (snd . snd3) $ reverse $ Trie.matches ctxs bs
+    rootInit = fromCounts im :: Term
+    (root, ts) = L.mapAccumL (flip emptyFromParent) rootInit $ IM.keys im
+
+-- | Sum up the terms, giving the information content (nats) of the
+-- whole string w.r.t. the model
+information :: Model -> Double
+information (Model _ t0 ts) = t0^.termRes + sumOf (folded.termRes) ts
+
+checkTerms :: Model -> a -> a
+checkTerms mdl@(Model rs t0 ts) = foldr ((.) . checkLineageOf) id [0..R.numSymbols rs]
+  where
+    checkLineageOf :: Int -> a -> a
+    checkLineageOf s = -- check lineage starting w/ root
+      let lineage = (t0:) $ reverse $ (ts V.!) <$> R.cSuffixes rs s
       in go IM.empty lineage
 
     go _ [] = id
     go acc (t@(Term _ (Coef total m lc) _):rest)
       | sum counts /= total =
-          err $ "Realized counts don't sum to stored total "
+          err $ "Inherited counts don't sum to stored total "
           ++ show (sum counts, total) ++ ": " ++ show t
-          ++ "\n\n in trie \n\n" ++ Trie.showTrie ctxs
+          ++ "\n\n in model \n\n" ++ show mdl
 
       | not $ within 100 lc logCoef =
           err $ "Computed log-Coef is not equal to stored value ("
@@ -173,7 +187,7 @@ checkTrie ctxs = foldr ((.) . checkLineageOf) id $
           ++ " ULPs of difference (tolerance 100). Should be "
           ++ show logCoef ++ " but term is:\n" ++ show t
           ++ "\n\n with actual counts \n\n" ++ show counts
-          ++ "\n\n in trie \n\n" ++ Trie.showTrie ctxs
+          ++ "\n\n in model \n\n" ++ show mdl
 
       -- TODO: check num? (against what?)
 
@@ -182,52 +196,6 @@ checkTrie ctxs = foldr ((.) . checkLineageOf) id $
         counts = IM.union acc m
         logCoef = logFactorial total
                   - sum (logFactorial <$> counts)
-
------------
--- MODEL --
------------
-
-type ContextTrie = Trie (Maybe Int, Term) -- Nothing iff root/top Term
-
--- | A model is a set of contexts (ordered by rev-suffix) with frequency
--- counts that are inherited and otherwise deviate only by each
--- context's own claims to certain counts of certain symbols
-data Model m = Model {
-  _modelRules    :: !(Rules m), -- inv construction rules
-  _modelCtxKeys  :: !(BoxedVec m ByteString), -- rev-extensions
-  _modelContexts :: !ContextTrie -- suffix trie :: revExt -> (s, Term)
-}
-makeLenses ''Model
-
--- | Construct a 0-gram model from the counts of the symbols in the
--- data, which corresponds to a single term for the distribution in
--- the empty context
-singleton :: PrimMonad m => IntMap Int -> m (Model m)
-singleton im = do
-  rs <- R.new
-  cks <- DMV.fromList $ BS.singleton <$> [0..255]
-
-  let -- fold construct all terms from a root prior
-      fromRoot :: Term -> Int -> (Term, (ByteString, (Maybe Int, Term)))
-      fromRoot t s = (BS.singleton $ toEnum s,) . (Just s,)
-              <$> emptyFromParent s t
-      (root, ts) = L.mapAccumL fromRoot (rootTerm im) $ IM.keys im
-
-      ctxs = assert (root^.termWeight.weightNum == 1 || IM.null im)
-             Trie.fromList $ (BS.empty, (Nothing, root)) : ts
-
-  return $ Model rs cks ctxs
-
--- | Sum up the terms, giving the information content (nats) of the
--- whole string w.r.t. the model
-information :: Model m -> Double
-information = sumOf $ modelContexts . folded . _2 . termRes
-
-revExtension :: PrimMonad m => Model m -> Int -> Stream (Of Word8) m ()
-revExtension = effect . fmap (S.each . BS.unpack) .: ctxKey
-
-ctxKey :: PrimMonad m => Model m -> Int -> m ByteString
-ctxKey (Model _ ctxKeys _) = DMV.read ctxKeys
 
 ----------------------
 -- PATTERN MATCHING --
@@ -239,46 +207,26 @@ ctxKey (Model _ ctxKeys _) = DMV.read ctxKeys
 -- [s1B,s1AB,s1AAB,s1AAA,..], and so on, where (sA,sB) are the
 -- components of a joint symbol s. Returns matched pattern in reverse
 -- (back to normal orientation) (fst) and remainder of the list (snd).
-cMatchRev :: PrimMonad m => Model m -> Int -> [Int] -> m (Maybe ([Int], [Int]))
+cMatchRev :: Model -> Int -> [Int] -> Maybe ([Int], [Int])
 cMatchRev (Model rs _ _) = flip go []
   where
-    go _ _ [] = return Nothing
+    go _ _ [] = Nothing
     go s1 cPref1 (s:rest)
-      | s1 == s = return $ Just (s1:cPref1, rest)
-      | otherwise = do
-          R.invLookup s1 rs >>= 
-            \case Just (sA,sB) | sB == s -> go sA (sB:cPref1) rest
-                  _else -> return Nothing
+      | s1 == s = Just (s1:cPref1, rest)
+      | otherwise = case R.invLookup rs s1 of
+          Just (sA,sB) | sB == s -> go sA (sB:cPref1) rest
+          _else -> Nothing
 
--- | Try to match the extension of a symbol s0 at the end of a list of
--- symbols given in reverse order. This is just string comparison
--- between the extensions of the given symbols. Return the remaining
--- rev-extension of the rev-list of symbols if the match is successful.
-eMatchRev :: PrimMonad m => Model m -> Int -> [Int] -> m (Maybe (Stream (Of Word8) m ()))
-eMatchRev mdl@(Model _ ctxKeys _) s0 str = do
-  bs <- DMV.read ctxKeys s0
-  ffmap snd $ -- m, Maybe
-    S.eq (S.each $ BS.unpack bs) $
-    S.splitAt (BS.length bs) $
-    S.mapM_ (revExtension mdl) $
-    S.each str
+-- cResolveFwd :: Model -> [Int] -> [Int]
+-- cResolveFwd = undefined -- FIXME: TODO
 
-cResolveFwd :: PrimMonad m => Model m -> [Int] -> m [Int]
-cResolveFwd = undefined -- FIXME: TODO
-
--- | Given a model and a stream of atoms, return all the symbols (atomic
--- or constructed) whose reversed extension matches the head of the
--- stream
-eResolveBwd :: PrimMonad m => Model m -> Stream (Of Word8) m r -> m [Int]
-eResolveBwd = fmap (mapMaybe fst) .: resolveCtx -- discard Terms and root
-
--- | Given a reverse stream of previous atoms, return the terms
--- associated with this context, from root to largest construction. You
--- probably want to reverse this list because claims down the list
--- supersede earlier claims.
-resolveCtx :: PrimMonad m =>
-              Model m -> Stream (Of Word8) m r -> m [(Maybe Int, Term)]
-resolveCtx = fmap snd3 .: Trie.resolveGeneric BS.empty . _modelContexts
+-- -- | Given a reverse stream of previous atoms, return the terms
+-- -- associated with this context, from root to largest construction. You
+-- -- probably want to reverse this list because claims down the list
+-- -- supersede earlier claims.
+-- resolveCtx :: PrimMonad m =>
+--               Model -> Stream (Of Word8) m r -> m [(Maybe Int, Term)]
+-- resolveCtx = fmap snd3 .: Trie.resolveGeneric BS.empty . _modelContexts
 
 ---------------
 -- INSERTION --
@@ -286,110 +234,87 @@ resolveCtx = fmap snd3 .: Trie.resolveGeneric BS.empty . _modelContexts
 
 -- | Given a pair of symbols and the number of times the prefixes (from
 -- large to small, from itself to its first atom) appear
-insert :: PrimMonad m => (Int,Int) -> IntMap Int -> Model m ->
-          m (Double, Int, Model m)
-insert (s0,s1) im mdl@(Model rs ctxKeys ctxTrie) = do
-  ctx0 <- ctxKey mdl s0 -- rev-extension of s3
+insert :: Model -> (Int,Int) -> IntMap Int -> (Double, Int, Model)
+insert (Model rs root terms) (s0,s1) counts1 = runST $ do
 
-  -- 1) remove counts from e-suffixes of s0 to c-prefixes of s1 -----------
-  let (cPref1s, introCounts) = unzip $ IM.toDescList im -- big to small
+  -- thaw model
+  mutTerms <- B.thaw terms
+  mutRoot <- newSTRef root
+  let adjust = adjustCount $ Model rs mutRoot mutTerms
 
-      -- tasks
-      subInter :: [ContextTrie -> (Double, ContextTrie)]
-      subInter = zipWith (subCount ctx0) cPref1s introCounts
+  -- 0) remove edges from s0 suffixes to s1 prefixes
+  let cSuf0s = R.cSuffixes rs s0 -- symbols large to small
+      cSuf0ts = toSnd (terms V.!) <$> cSuf0s -- with terms
+      cPref1ns = IM.toAscList counts1
 
-  -- 2) remove counts within s1 (e-suffixes of s0+{c-prefix of s1}) -------
-  intraCtxs <- forM cPref1s $ \s ->
-    R.invLookup s rs >>=
-    \case Nothing -> return (ctx0, s)
-          Just (sA,sB) -> (,sB) . (ctx0 <>) <$> ctxKey mdl sA
+  d0s <- forM cPref1ns $ \(cPref1,n) ->
+    if n == 0 then return 0.0
+    else -- subtract n from cPref1's claimant
+      flip2 adjust cPref1 (+(-n)) $
+      fst <$> L.find (flip claims cPref1 . snd) cSuf0ts
 
-  let cumCounts = init $ scanr (+) 0 introCounts
+  -- 1) remove edges from s1 prefixes to s1
+  let (cPref1s, ns) = unzip cPref1ns
+      cumCounts1 = tail $ scanl (+) 0 ns
 
-      -- tasks
-      subIntra :: [ContextTrie -> (Double, ContextTrie)]
-      subIntra = zipWith (uncurry subCount) intraCtxs cumCounts
+  d1s <- forM (zip cPref1s cumCounts1) $ \(cPref1,cn) ->
+    if cn == 0 then return 0.0
+    else case R.invLookup rs cPref1 of
+      Nothing -> return 0.0
+      Just (cPref1A, cPref1B) ->
+        adjust (Just cPref1A) cPref1B (+(-cn))
 
-  -- 3) add the n01 s0-s1's -----------------------------------------------
-      n01 = assertId (== sum introCounts) $ head cumCounts
+  -- 2) add the n01 s0-s1's
+  let n01 = sum ns
+  d2 <- adjust (Just s0) s1 (\oldCount -> assert (oldCount == 0) n01)
 
-      -- task
-      addInter :: ContextTrie -> (Double, ContextTrie)
-      addInter = adjustCount ctx0 s1 $ ($ n01) . assert . (== 0)
+  -- make term for s01 (no impact on loss, keep lazy)
+  let (s01,rs') = R.push (s0,s1) rs
+  t1 <- MV.read mutTerms s1
+  let (t1', t01) = emptyFromParent n01 t1
+  MV.write mutTerms s1 t1'
 
-  -- 4) make term for s01 (as a context) ----------------------------------
-  (s01,rs') <- R.push (s0,s1) rs
-  ctx1 <- ctxKey mdl s1
-  let ctx01 = ctx1 <> ctx0 -- flip bc rev-extension
-  ctxKeys' <- assert (DMV.length ctxKeys == s01)
-              DMV.push ctxKeys ctx01
+  -- freeze
+  terms' <- V.freeze mutTerms
+  root' <- readSTRef mutRoot
 
-  let (parentKey, (pS, parentTerm), _) = fromJust $ Trie.match ctxTrie ctx01
-      (parentTerm', t01) = emptyFromParent n01 parentTerm
-
-      -- task
-      addTerm :: ContextTrie -> (Double, ContextTrie)
-      addTerm = (0.0,) . Trie.insert ctx01 (Just s01, t01)
-                . Trie.insert parentKey (pS, parentTerm')
-
-  -- All together:
-      (ctxTrie', deltas) = L.mapAccumR (swap .: (&)) ctxTrie $
-                           addTerm : addInter : subIntra ++ subInter
-
-  return (sum deltas, -- loss
-          s01, -- new symbol
-          Model rs' ctxKeys' ctxTrie') -- updated model
-  where
-    -- | Given a context as a ByteString, a symbol predicted and a
-    -- count, lookup the term claiming that symbol and subtract the
-    -- count, updating the value of affected terms. TODO: return loss
-    subCount :: ByteString -> Int -> Int -> ContextTrie -> (Double, ContextTrie)
-    subCount _   _ 0 = (0.0,) -- short circuit 0s
-    subCount ctx s n = case L.find (flip claims s . snd . snd) $ eSuffixes ctx of
-      Nothing -> err $ "Diagram.Model.insert.subCount: "
-                       ++ "Can't find symbol " ++ show s
-                       ++ " in context lineage: " ++ show (eSuffixes ctx)
-      Just (claimant, _) -> adjustCount claimant s (+(-n))
-                   
-
-    -- | Lookup the context trie with a maximal context, returning the
-    -- matching terms from most specific (exact match if there) to most
-    -- general (root)
-    eSuffixes :: ByteString -> [(ByteString, (Maybe Int, Term))]
-    eSuffixes = fmap (fst3 &&& snd3) . reverse . Trie.matches ctxTrie
-
+  return ( sum d0s + sum d1s + d2
+         , assert (s01 == V.length terms') s01
+         , Model rs' root' $ V.snoc terms' t01 )
 
 -- | Modify the count of a symbol in a context given as a bytestring key
 -- (rev-extension of the context symbol). This changes the claim for the
 -- symbol in the context (assumes a claim is there) and propagates
 -- implications for inheriting terms
-adjustCount :: ByteString -> Int -> (Int -> Int) ->
-               ContextTrie -> (Double, ContextTrie)
-adjustCount k s f ctxs = (getSum delta, ctxs')
-  where
-    -- split subtrie from trie
-    subtrie = Trie.submap k ctxs
-    rest = Trie.deleteSubmap k ctxs
+adjustCount :: MModel s -> Maybe Int -> Int -> (Int -> Int) -> ST s Double
+adjustCount (Model rs root ts) s0 s1 f = do
+  -- read root of the affected subtrie
+  t0 <- maybe (readSTRef root) (MV.read ts) s0
+  let (mOldCount1, t0') = t0 & termCoef.coefClaims
+        %%~ IM.updateLookupWithKey (\_ -> nothingIf (== 0) . f) s1
+      oldCount1 = fromMaybe 0 mOldCount1
+      newCount1 = f oldCount1
+      substRes = substCoefFactor oldCount1 newCount1
 
-    -- change the coef in the root
-    (mOldCount1, subtrie') = flip Trie.mapRootF subtrie $
-      \t -> t & _2.termCoef.coefClaims
-            %%~ IM.updateLookupWithKey (const $ nothingIf (== 0) . f) s
-    oldCount1 = fromMaybe 0 mOldCount1
-    newCount1 = f oldCount1
+      sc0s = maybe [0..255] (R.sChildren rs) s0
+      (d0, t0'') = substRes t0'
 
-    -- propagate change in children
-    updateInherited :: (Maybe Int, Term) -> Maybe (Sum Double, (Maybe Int, Term))
-    updateInherited (ms,t)
-      | s `IM.member` (t^.termCoef.coefClaims) = Nothing
-      | otherwise = let (dlt,t') = substCoefFactor oldCount1 newCount1 t
-                    in Just (Sum dlt, (ms,t'))
+  -- write root
+  maybe (writeSTRef root t0'') (flip (MV.write ts) t0'') s0
 
-    (delta, subtrie'') = Trie.mapAccumWhile updateInherited subtrie'
+  -- rec worker
+  let go s = do
+        t <- MV.read ts s
+        if s1 `IM.member` (t^.termCoef.coefClaims)
+          then return 0.0
+          else do let (d,t') = substRes t
+                  MV.write ts s t'
+                  let scs = R.sChildren rs s
+                  ds <- forM scs go -- rec
+                  return $ sum (d:ds)
 
-    -- merge subtrie back into trie
-    ctxs' = flip2 Trie.mergeBy rest subtrie'' $
-            err "adjustCount: Conflicting tries"
+  ds <- forM sc0s go -- propagate
+  return $ sum (d0:ds)
 
 -- | Update the coefficient of a term where a symbol had `oldCount` to
 -- one where it is `newCount`. Does not affect term claims, so works on
