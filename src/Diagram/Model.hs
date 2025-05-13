@@ -217,68 +217,46 @@ cMatchRev (Model rs _ _) = flip go []
           Just (sA,sB) | sB == s -> go sA (sB:cPref1) rest
           _else -> Nothing
 
--- cResolveFwd :: Model -> [Int] -> [Int]
--- cResolveFwd = undefined -- FIXME: TODO
-
--- -- | Given a reverse stream of previous atoms, return the terms
--- -- associated with this context, from root to largest construction. You
--- -- probably want to reverse this list because claims down the list
--- -- supersede earlier claims.
--- resolveCtx :: PrimMonad m =>
---               Model -> Stream (Of Word8) m r -> m [(Maybe Int, Term)]
--- resolveCtx = fmap snd3 .: Trie.resolveGeneric BS.empty . _modelContexts
-
 ---------------
 -- INSERTION --
 ---------------
 
 -- | Given a pair of symbols and the number of times the prefixes (from
 -- large to small, from itself to its first atom) appear
-insert :: Model -> (Int,Int) -> IntMap Int -> (Double, Int, Model)
-insert (Model rs root terms) (s0,s1) counts1 = runST $ do
+insert :: Model -> (Int,Int) -> Int -> (Maybe Int, Int) -> (Double, Int, Model)
+insert (Model rs root terms) (s0,s1) n (suf0,pre1) = runST $ do
 
   -- thaw model
   mutTerms <- B.thaw terms
   mutRoot <- newSTRef root
   let adjust = adjustCount $ Model rs mutRoot mutTerms
 
-  -- 0) remove edges from s0 suffixes to s1 prefixes
-  let cSuf0s = R.cSuffixes rs s0 -- symbols large to small
-      cSuf0ts = toSnd (terms V.!) <$> cSuf0s -- with terms
-      cPref1ns = IM.toAscList counts1
+  -- 0) remove n edges from suf0 to pre1
+  d0 <- adjust suf0 pre1 (+(-n))
 
-  d0s <- forM cPref1ns $ \(cPref1,n) ->
-    if n == 0 then return 0.0
-    else -- subtract n from cPref1's claimant
-      flip2 adjust cPref1 (+(-n)) $
-      fst <$> L.find (flip claims cPref1 . snd) cSuf0ts
+  -- 1) remove edges from pre1 (exclusive) to s1 (inclusive)
+  let cPref1s = tail $ L.dropWhile (/= pre1) $ -- excluding pre1
+                reverse $ R.cPrefixes rs s1 -- from small to big
 
-  -- 1) remove edges from s1 prefixes to s1
-  let (cPref1s, ns) = unzip cPref1ns
-      cumCounts1 = tail $ scanl (+) 0 ns
-
-  d1s <- forM (zip cPref1s cumCounts1) $ \(cPref1,cn) ->
-    if cn == 0 then return 0.0
-    else case R.invLookup rs cPref1 of
+  d1s <- forM cPref1s $ \cPref1 ->
+    case R.invLookup rs cPref1 of
       Nothing -> return 0.0
-      Just (cPref1A, cPref1B) ->
-        adjust (Just cPref1A) cPref1B (+(-cn))
+      Just (cPref1A, cPref1B) -> adjust (Just cPref1A) cPref1B (+(-n))
 
   -- 2) add the n01 s0-s1's
-  let n01 = sum ns
-  d2 <- adjust (Just s0) s1 (\oldCount -> assert (oldCount == 0) n01)
+  d2 <- adjust (Just s0) s1 (\oldCount -> assert (oldCount == 0) n)
 
   -- make term for s01 (no impact on loss, keep lazy)
   let (s01,rs') = R.push (s0,s1) rs
   t1 <- MV.read mutTerms s1
-  let (t1', t01) = emptyFromParent n01 t1
+  let (t1', t01) = emptyFromParent n t1
   MV.write mutTerms s1 t1'
 
   -- freeze
   terms' <- V.freeze mutTerms
   root' <- readSTRef mutRoot
 
-  return ( sum d0s + sum d1s + d2
+  return ( d0 + sum d1s + d2
          , assert (s01 == V.length terms') s01
          , Model rs' root' $ V.snoc terms' t01 )
 
