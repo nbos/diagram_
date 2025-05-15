@@ -16,6 +16,8 @@ import qualified Data.Vector as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
 
 import Diagram.Util
 
@@ -23,12 +25,14 @@ data Rules = Rules {
   -- | Self-referrential vector of recipes for the construction of all
   -- symbols above 256 indexed at s-256
   invRules :: !(U.Vector (Int,Int)), -- s01 -> (s0,s1)
-  sufChildren :: !(B.Vector [Int]) -- s1 -> [s01]
+  byFst    :: !(B.Vector (IntMap Int)),    -- s0 -> s1 -> s01
+  bySnd    :: !(B.Vector (IntMap Int))     -- s1 -> s0 -> s01
 } deriving (Show)
 
 -- | New empty rule set
 empty :: Rules
-empty = Rules V.empty $ V.replicate 256 []
+empty = Rules V.empty emptySets emptySets
+  where emptySets = V.replicate 256 IM.empty
 
 -- | Number of rules
 size :: Rules -> Int
@@ -40,37 +44,42 @@ numSymbols = (256 +) . size
 
 -- | Compute the length of a symbol
 symbolLength :: Rules -> Int -> Int
-symbolLength (Rules irs _) = go
+symbolLength (Rules irs _ _) = go
   where
     go s | s < 256   = 1
          | otherwise = let (s0,s1) = irs V.! (s - 256)
                        in go s0 + go s1
 
 fromList :: [(Int, Int)] -> Rules
-fromList l = Rules irs scs
+fromList l = Rules irs bfs bss
   where
     irs = V.fromList l
     sz = V.length irs
-    scs = runST $ do
-      mscs <- MV.replicate (256 + sz) []
+    (bfs, bss) = runST $ do
+      mbfs <- MV.replicate (256 + sz) IM.empty
+      mbss <- MV.replicate (256 + sz) IM.empty
       forM_ (zip l [256..]) $ \((s0,s1),s01) ->
         assert (s0 < s01 && s1 < s01)
-        MV.modify mscs (s01:) s1
-      V.freeze mscs
+        MV.modify mbfs (IM.insert s1 s01) s0 -- s0 -> s1 -> s01
+        >> MV.modify mbss (IM.insert s0 s01) s1 -- s1 -> s0 -> s01
+      fbfs <- V.freeze mbfs
+      fbss <- V.freeze mbss
+      return (fbfs, fbss)
 
 -- | Add a new symbol with a construction rule. Returns updated rules
 -- and index of new symbol. O(n)
 push :: (Int, Int) -> Rules -> (Int, Rules)
-push s0s1@(_,s1) rs@(Rules irs scs) = assert (both (< s01) s0s1)
-                                      (s01, Rules irs' scs')
+push s0s1@(s0,s1) rs@(Rules irs pcs scs) = assert (both (< s01) s0s1)
+                                          (s01, Rules irs' pcs' scs')
   where
     s01 = numSymbols rs
     irs' = V.snoc irs s0s1
-    scs' = V.modify (flip2 MV.modify (s01:) s1) scs
+    pcs' = V.modify (flip2 MV.modify (IM.insert s1 s01) s0) pcs
+    scs' = V.modify (flip2 MV.modify (IM.insert s0 s01) s1) scs
 
 -- | Lookup the rule for constructing a given symbol
 (!) :: Rules -> Int -> (Int,Int)
-(!) (Rules irs _) s = irs V.! (s - 256)
+(!) (Rules irs _ _) s = irs V.! (s - 256)
 infixl 9 !
 
 -- | Lookup the rule for constructing a given symbol. Nothing returned
@@ -80,15 +89,15 @@ invLookup rs s | s < 256   = Nothing
                | otherwise = Just $ rs ! s
 
 -- | Return all symbols that have the given symbols as a right symbol
--- (s1) in an unspecified order (reverse symbol index as value for now)
+-- (s1) in an unspecified order (in order of the left symbols index)
 sChildren :: Rules -> Int -> [Int]
-sChildren (Rules _ scs) s = scs V.! s
+sChildren (Rules _ _ bss) s1 = IM.elems $ bss V.! s1
 
 -- | Deconstruct a symbol back into a list of bytes
 extension :: Rules -> Int -> [Word8]
-extension (Rules irs _) = go
+extension (Rules irs _ _) = go
   where
-    go s | s < 256 = [toEnum s]
+    go s | s < 256 = [fromIntegral s]
          | otherwise = let (s0,s1) = irs V.! (s - 256)
                        in go s0 ++ go s1
 
@@ -96,7 +105,7 @@ extension (Rules irs _) = go
 -- symbol, from large to small, starting with the symbol itself and
 -- ending with the first atomic symbol of its extension
 cPrefixes :: Rules -> Int -> [Int]
-cPrefixes (Rules irs _) = go
+cPrefixes (Rules irs _ _) = go
   where
     go s | s < 256 = [s]
          | otherwise = let (s0,_) = irs V.! (s - 256)
@@ -106,7 +115,7 @@ cPrefixes (Rules irs _) = go
 -- symbol, from large to small, starting with the symbol itself and
 -- ending with the last atomic symbol of its extension
 cSuffixes :: Rules -> Int -> [Int]
-cSuffixes (Rules irs _) = go
+cSuffixes (Rules irs _ _) = go
   where
     go s | s < 256 = [s]
          | otherwise = let (_,s1) = irs V.! (s - 256)
@@ -119,45 +128,41 @@ toString = UTF8.toString
            . fmap fromIntegral
            .: extension
 
--- resolveGeneric :: forall m. PrimMonad m =>
---                   (forall a b. (a -> a -> b) -> a -> a -> b) ->
---                   (Rules -> Int -> (IntMap Int)) ->
---                   Rules -> [Int] -> [Int]
--- resolveGeneric _ _ _ [] = return []
--- resolveGeneric comb withAsFstFn rs (a0:atoms) = go a0 atoms
---   where
---     go s0 as = do
---       -- see what s0 is fst as:
---       m0 <- rs `withAsFstFn` s0
---       -- match their extensions against atoms:
---       mres0s <- mapM (`againstAtoms` as) $ IM.toList m0
---       -- if match, recurse, looking up further constructions:
---       recs <- mapM (uncurry go) $ catMaybes mres0s
---       return $ s0 : concat recs
+-- | Try to match the construction of a symbol s1 at the end of a list
+-- of symbols given in reverse order. The patterns that resolve to a
+-- Just are [s1,..], [s1B,s1A,..], [s1B,s1AB,s1AA,..],
+-- [s1B,s1AB,s1AAB,s1AAA,..], and so on, where (sA,sB) are the
+-- components of a joint symbol s. Returns matched pattern in reverse
+-- (back to normal orientation) (fst) and remainder of the list (snd).
+cMatchRev :: Rules -> Int -> [Int] -> Maybe ([Int], [Int])
+cMatchRev rs = flip go []
+  where
+    go _ _ [] = Nothing
+    go s1 cPref1 (s:rest)
+      | s1 == s = Just (s1:cPref1, rest)
+      | otherwise = case invLookup rs s1 of
+          Just (sA,sB) | sB == s -> go sA (sB:cPref1) rest
+          _else -> Nothing
 
---     -- | check a symbol's extension against the atom string, returning
---     -- remaining atoms if they match
---     againstAtoms :: (Int, res) -> [Int] -> (Maybe (res, [Int]))
---     againstAtoms (s1,res) as = (res,)
---       <<$>> goMatch (extensionGeneric comb rs s1) as
+-- | Return all the symbols (large to small) that terminate at a given
+-- context-target pair. Having the context there avoids doing the search
+-- needed for e.g. resolution in the forwards direction (TODO: add a
+-- reverse context and make forward-resolution as fast?)
+cResolveRev :: Rules -> (Maybe Int, Int) -> [Int]
+cResolveRev rs (Nothing, s1) = cSuffixes rs s1
+cResolveRev rs@(Rules _ bfs _) (Just s0, s1) =
+  cSuffixes rs $ (bfs V.! s0) IM.! s1
 
---     -- | onlyIfMatch's rec helper
---     goMatch :: Stream (Of Int) m r -> [Int] -> (Maybe [Int])
---     goMatch str as = S.uncons str >>=
---       \case Nothing -> return $ Just as -- end of extension
---             Just (s,str') -> case as of
---               [] -> return Nothing
---               a:rest | s == a -> goMatch str' rest
---                      | otherwise -> return Nothing
--- {-# INLINE resolveGeneric #-}
-
--- -- | Construct all possible symbols at the head of the given string of
--- -- symbols
--- resolvePrefixes :: Rules -> [Int] -> [Int]
--- resolvePrefixes = resolveGeneric id withAsFst
-
--- -- | Construct all possible symbols at the head of a reversed list of
--- -- symbols (i.e. all symbols that end at the tail of the reverse of the
--- -- input list)
--- resolveSuffixes :: Rules -> [Int] -> [Int]
--- resolveSuffixes = resolveGeneric flip withAsSnd
+-- | Return all the symbols that begin at the start of a list of targets
+-- (large to small)
+cResolve :: Rules -> [Int] -> [Int]
+cResolve _ [] = []
+cResolve rs@(Rules _ bfs _) (hd:tl) = go hd tl
+  where
+    go s0 ss | (s1:rest) <- ss,
+               Just s01 <- (bfs V.! s0) IM.!? s1 = go s01 rest
+             | otherwise = cPrefixes rs s0
+    -- go s0 [] = cPrefixes rs s0
+    -- go s0 (s1:rest) = case (bfs V.! s0) IM.!? s1 of
+    --                     Nothing -> cPrefixes rs s0
+    --                     Just s01 -> go s01 rest

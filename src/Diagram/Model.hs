@@ -197,26 +197,6 @@ checkTerms mdl@(Model rs t0 ts) = foldr ((.) . checkLineageOf) id [0..R.numSymbo
         logCoef = logFactorial total
                   - sum (logFactorial <$> counts)
 
-----------------------
--- PATTERN MATCHING --
-----------------------
-
--- | Try to match the construction of a symbol s1 at the end of a list
--- of symbols given in reverse order. The patterns that resolve to a
--- Just are [s1,..], [s1B,s1A,..], [s1B,s1AB,s1AA,..],
--- [s1B,s1AB,s1AAB,s1AAA,..], and so on, where (sA,sB) are the
--- components of a joint symbol s. Returns matched pattern in reverse
--- (back to normal orientation) (fst) and remainder of the list (snd).
-cMatchRev :: Model -> Int -> [Int] -> Maybe ([Int], [Int])
-cMatchRev (Model rs _ _) = flip go []
-  where
-    go _ _ [] = Nothing
-    go s1 cPref1 (s:rest)
-      | s1 == s = Just (s1:cPref1, rest)
-      | otherwise = case R.invLookup rs s1 of
-          Just (sA,sB) | sB == s -> go sA (sB:cPref1) rest
-          _else -> Nothing
-
 ---------------
 -- INSERTION --
 ---------------
