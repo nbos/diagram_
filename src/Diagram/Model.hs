@@ -171,7 +171,7 @@ checkTerms mdl@(Model rs t0 ts) = foldr ((.) . checkLineageOf) id [0..R.numSymbo
   where
     checkLineageOf :: Int -> a -> a
     checkLineageOf s = -- check lineage starting w/ root
-      let lineage = (t0:) $ reverse $ (ts V.!) <$> R.cSuffixes rs s
+      let lineage = (t0:) $ reverse $ (ts V.!) <$> R.suffixes rs s
       in go IM.empty lineage
 
     go _ [] = id
@@ -216,7 +216,7 @@ insert (Model rs root terms) (s0,s1) n (suf0,pre1) = runST $ do
 
   -- 1) remove edges from pre1 (exclusive) to s1 (inclusive)
   let cPref1s = tail $ L.dropWhile (/= pre1) $ -- excluding pre1
-                reverse $ R.cPrefixes rs s1 -- from small to big
+                reverse $ R.prefixes rs s1 -- from small to big
 
   d1s <- forM cPref1s $ \cPref1 ->
     case R.invLookup rs cPref1 of
@@ -254,7 +254,7 @@ adjustCount (Model rs root ts) s0 s1 f = do
       newCount1 = f oldCount1
       substRes = substCoefFactor oldCount1 newCount1
 
-      sc0s = maybe [0..255] (R.sChildren rs) s0
+      sc0s = maybe [0..255] (R.withAsSnd rs) s0
       (d0, t0'') = substRes t0'
 
   -- write root
@@ -267,8 +267,7 @@ adjustCount (Model rs root ts) s0 s1 f = do
           then return 0.0
           else do let (d,t') = substRes t
                   MV.write ts s t'
-                  let scs = R.sChildren rs s
-                  ds <- forM scs go -- rec
+                  ds <- forM (R.withAsSnd rs s) go -- rec
                   return $ sum (d:ds)
 
   ds <- forM sc0s go -- propagate

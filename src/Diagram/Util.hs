@@ -247,6 +247,9 @@ infixr 1 >.>
 -- Lists --
 -----------
 
+takeUntil :: (a -> Bool) -> [a] -> [a]
+takeUntil p = foldr (\x ys -> x : if p x then [] else ys) []
+
 uncons :: [a] -> (a,[a])
 uncons (hd:tl) = (hd,tl)
 uncons [] = error "Util.uncons: empty list"

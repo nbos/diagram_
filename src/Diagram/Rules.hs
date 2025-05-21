@@ -90,8 +90,14 @@ invLookup rs s | s < 256   = Nothing
 
 -- | Return all symbols that have the given symbols as a right symbol
 -- (s1) in an unspecified order (in order of the left symbols index)
-sChildren :: Rules -> Int -> [Int]
-sChildren (Rules _ _ bss) s1 = IM.elems $ bss V.! s1
+withAsSnd :: Rules -> Int -> [Int]
+withAsSnd (Rules _ _ bss) s1 = IM.elems $ bss V.! s1
+
+-- | Construct the greater symbol if the prediction is from a non-null
+-- context, else return the target symbol.
+constr :: Rules -> (Maybe Int, Int) -> Int
+constr _ (Nothing, tgt) = tgt
+constr (Rules _ bfs _) (Just s0, s1) = (bfs V.! s0) IM.! s1
 
 -- | Deconstruct a symbol back into a list of bytes
 extension :: Rules -> Int -> [Word8]
@@ -104,8 +110,8 @@ extension (Rules irs _ _) = go
 -- | List the symbols that are constructive prefixes of the given
 -- symbol, from large to small, starting with the symbol itself and
 -- ending with the first atomic symbol of its extension
-cPrefixes :: Rules -> Int -> [Int]
-cPrefixes (Rules irs _ _) = go
+prefixes :: Rules -> Int -> [Int]
+prefixes (Rules irs _ _) = go
   where
     go s | s < 256 = [s]
          | otherwise = let (s0,_) = irs V.! (s - 256)
@@ -114,8 +120,8 @@ cPrefixes (Rules irs _ _) = go
 -- | List the symbols that are constructive suffixes of the given
 -- symbol, from large to small, starting with the symbol itself and
 -- ending with the last atomic symbol of its extension
-cSuffixes :: Rules -> Int -> [Int]
-cSuffixes (Rules irs _ _) = go
+suffixes :: Rules -> Int -> [Int]
+suffixes (Rules irs _ _) = go
   where
     go s | s < 256 = [s]
          | otherwise = let (_,s1) = irs V.! (s - 256)
@@ -129,13 +135,14 @@ toString = UTF8.toString
            .: extension
 
 -- | Try to match the construction of a symbol s1 at the end of a list
--- of symbols given in reverse order. The patterns that resolve to a
--- Just are [s1,..], [s1B,s1A,..], [s1B,s1AB,s1AA,..],
+-- of symbols given in reverse order. The patterns that produce a Just
+-- are [s1,..], [s1B,s1A,..], [s1B,s1AB,s1AA,..],
 -- [s1B,s1AB,s1AAB,s1AAA,..], and so on, where (sA,sB) are the
--- components of a joint symbol s. Returns matched pattern in reverse
--- (back to normal orientation) (fst) and remainder of the list (snd).
-cMatchRev :: Rules -> Int -> [Int] -> Maybe ([Int], [Int])
-cMatchRev rs = flip go []
+-- components of a constructed symbol s. Returns matched pattern in
+-- reverse (i.e. back to normal orientation) (fst) and remainder of the
+-- list (snd).
+matchBwd :: Rules -> Int -> [Int] -> Maybe ([Int], [Int])
+matchBwd rs = flip go []
   where
     go _ _ [] = Nothing
     go s1 cPref1 (s:rest)
@@ -146,23 +153,27 @@ cMatchRev rs = flip go []
 
 -- | Return all the symbols (large to small) that terminate at a given
 -- context-target pair. Having the context there avoids doing the search
--- needed for e.g. resolution in the forwards direction (TODO: add a
--- reverse context and make forward-resolution as fast?)
-cResolveRev :: Rules -> (Maybe Int, Int) -> [Int]
-cResolveRev rs (Nothing, s1) = cSuffixes rs s1
-cResolveRev rs@(Rules _ bfs _) (Just s0, s1) =
-  cSuffixes rs $ (bfs V.! s0) IM.! s1
-
--- | Return all the symbols that begin at the start of a list of targets
--- (large to small)
-cResolve :: Rules -> [Int] -> [Int]
-cResolve _ [] = []
-cResolve rs@(Rules _ bfs _) (hd:tl) = go hd tl
+-- like resolution in the forwards direction
+resolveBwd :: Rules -> (Maybe Int, Int) -> [Int]
+resolveBwd rs (ctx,tgt) = suffixes rs s
   where
-    go s0 ss | (s1:rest) <- ss,
-               Just s01 <- (bfs V.! s0) IM.!? s1 = go s01 rest
-             | otherwise = cPrefixes rs s0
-    -- go s0 [] = cPrefixes rs s0
-    -- go s0 (s1:rest) = case (bfs V.! s0) IM.!? s1 of
-    --                     Nothing -> cPrefixes rs s0
-    --                     Just s01 -> go s01 rest
+    s = case ctx of
+          Nothing -> tgt
+          Just s0 -> (byFst rs V.! s0) IM.! tgt
+
+-- | Given a head symbol and subsequent predictions, return the largest
+-- symbol (both in index and size) that can be constructed from the
+-- leading symbols, i.e. recursively construct as long as possible
+maxHead :: Rules -> Int -> [(Maybe Int, Int)] -> Int
+maxHead (Rules _ bfs _) = go
+  where
+    go s pdns | ((Just s0, s1):rest) <- pdns
+              , s == s0 = go ((bfs V.! s0) IM.! s1) rest
+              | otherwise = s
+
+-- | Return all the symbols that begin at the start of a list of
+-- predictions (large to small) (head's context not included) (head's
+-- prefixes included)
+resolveFwd :: Rules -> [(Maybe Int, Int)] -> [Int]
+resolveFwd _ [] = []
+resolveFwd rs ((_,s0):rest) = prefixes rs $ maxHead rs s0 rest
