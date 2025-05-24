@@ -21,12 +21,14 @@ import qualified Data.IntMap.Strict as IM
 
 import Diagram.Util
 
+-- TODO: rm bySnd map (not used)
+
 data Rules = Rules {
   -- | Self-referrential vector of recipes for the construction of all
   -- symbols above 256 indexed at s-256
-  invRules :: !(U.Vector (Int,Int)), -- s01 -> (s0,s1)
-  byFst    :: !(B.Vector (IntMap Int)),    -- s0 -> s1 -> s01
-  bySnd    :: !(B.Vector (IntMap Int))     -- s1 -> s0 -> s01
+  invRules :: !(U.Vector (Int,Int)),    -- s01 -> (s0,s1)
+  byFst    :: !(B.Vector (IntMap Int)), -- s0 -> s1 -> s01
+  bySnd    :: !(B.Vector (IntMap Int))  -- s1 -> s0 -> s01
 } deriving (Show)
 
 -- | New empty rule set
@@ -70,7 +72,7 @@ fromList l = Rules irs bfs bss
 -- and index of new symbol. O(n)
 push :: (Int, Int) -> Rules -> (Int, Rules)
 push s0s1@(s0,s1) rs@(Rules irs pcs scs) = assert (both (< s01) s0s1)
-                                          (s01, Rules irs' pcs' scs')
+                                           (s01, Rules irs' pcs' scs')
   where
     s01 = numSymbols rs
     irs' = V.snoc irs s0s1
@@ -155,11 +157,7 @@ matchBwd rs = flip go []
 -- context-target pair. Having the context there avoids doing the search
 -- like resolution in the forwards direction
 resolveBwd :: Rules -> (Maybe Int, Int) -> [Int]
-resolveBwd rs (ctx,tgt) = suffixes rs s
-  where
-    s = case ctx of
-          Nothing -> tgt
-          Just s0 -> (byFst rs V.! s0) IM.! tgt
+resolveBwd rs = suffixes rs . constr rs
 
 -- | Given a head symbol and subsequent predictions, return the largest
 -- symbol (both in index and size) that can be constructed from the

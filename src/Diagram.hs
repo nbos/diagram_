@@ -8,10 +8,12 @@
 
 module Diagram (module Diagram) where
 
+import Control.Exception (assert)
 import Control.Lens hiding (pre)
 import Control.Monad.ST
 
 import Data.STRef
+import Data.Maybe
 import qualified Data.List as L
 
 import Data.Map.Strict (Map)
@@ -31,7 +33,7 @@ err = error . ("Diagram: " ++)
 data Search = Search {
   _sModel :: !Model,
   _sTargets :: ![Int],
-  _sCandidates :: !(Map (Int,Int) -- (s0,s1) -> 
+  _sCandidates :: !(Map (Int,Int) -- (s0,s1) ->
                     ((Maybe Int, Int), Int)) -- ((suf0, pref1), n)
 }
 makeLenses ''Search
@@ -41,7 +43,7 @@ fromString :: [Int] -> Search
 fromString ss =
   let mdl = Mdl.singleton counts
   -- ctxs <- forM ss $ DMV.read $ mdl^.modelKeys
-  -- let events = (BS.empty, hd) : zip ctxs tl 
+  -- let events = (BS.empty, hd) : zip ctxs tl
   in Search mdl ss candidates
   where
     counts = L.foldl' (\m s -> IM.insertWith (+) s 1 m) IM.empty ss
@@ -85,30 +87,32 @@ fromPredictions pps rs ((Nothing,ctx0):pdns) = runST $ do
           Int -> Int -> [(Maybe Int,Int)] -> ST s ()
     go _ _ _ [] = return () -- end
     go m i maxCtx ((minCtx,tgt):rest) = do
-      sequence_ [ inc m i s0 s1 | s0 <- left
-                                , s1 <- right
-                                , Just s0 /= minCtx || s1 /= tgt ]
+
+      -- inc anything greater than current
+      sequence_ [ inc m i s0 s1 | s0 <- ctxGE
+                                , s1 <- tgtGE
+                                , (Just s0, s1) /= (minCtx,tgt) ]
 
       go m i' maxHead pdns' -- continue
 
         where
-          -- filter (minCtx <=) (maxCtxB:[maxCtx])
-          left = maybe id (filter . (<=)) minCtx $
-                 maybe id ((:) . snd) (R.invLookup rs maxCtx)
-                 [maxCtx]
+          -- filter (ctx <=) (maxCtxB:[maxCtx])
+          ctxGE = maybe id (filter . (<=)) minCtx $
+                  maybe id ((:) . snd) (R.invLookup rs maxCtx) -- FIXME /!\
+                  [maxCtx]
             -- case R.invLookup rs maxCtx of
             -- Nothing -> [maxCtx]
-            -- Just (_, maxCtxB) -> case minCtx of
+            -- Just (_, maxCtxB) -> case ctx of
             --   Nothing -> [maxCtxB, maxCtx]
-            --   Just minCtxS | minCtxS == maxCtxB -> [maxCtxB, maxCtx]
-            --                | minCtxS == maxCtx -> [maxCtx]
+            --   Just ctxS | ctxS == maxCtxB -> [maxCtxB, maxCtx]
+            --                | ctxS == maxCtx -> [maxCtx]
             --                | otherwise -> err "impossible"
 
           maxHead = R.maxHead rs tgt rest
-          right = takeUntil (== tgt) $
+          tgtGE = takeUntil (== tgt) $
                   R.prefixes rs maxHead
 
-          headLen = length right
+          headLen = length tgtGE
           i' = i + headLen
           pdns' = drop (headLen - 1) rest
 
@@ -123,46 +127,58 @@ fromPredictions pps rs ((Nothing,ctx0):pdns) = runST $ do
           constructable = i - length inter1 > lastChunked
       in if constructable then (i,(pp,n+1)) else e
 
-
 updateCandidates :: Rules -> Int -> (Int, Int) -> (Maybe Int, Int) ->
                     Candidates -> [(Maybe Int, Int)] ->
                     (Candidates, [(Maybe Int, Int)])
-updateCandidates rs s01 (s0,s1) (preCtx,ppp1) cdts pdns = runST $ do
-  m <- newSTRef cdts
-  pdns' <- go m [] pdns
-  cdts' <- readSTRef m
-  return (cdts', pdns')
-  
+updateCandidates rs n (s0,s1) pp = flip go []
   where
-    go :: STRef s Candidates -> [(Maybe Int, Int)] ->
-          [(Maybe Int, Int)] -> ST s [(Maybe Int, Int)]
-    go _ bwd [] = return $ reverse bwd -- end
-    go m [] (pdn0:fwd) = go m [pdn0] fwd
-    go m bwd@(maxCtx@(ctxA,ctxB):bwdRest) fwd@(next@(minCtx,tgt):fwdRest)
-      | match0 && match1 = undefined
+    dec :: STRef s Candidates -> Int -> Int -> ST s ()
+    dec ref s0 s1 = undefined
 
-      | otherwise = undefined
-      where
-        -- only two cases match s0: s0 is the previous target or s0 is
-        -- the previous prediction (s0B target in the s0A context)
-        match0 = ctxB == s0 || case R.invLookup rs s0 of
-          Nothing -> False
-          Just (s0A,s0B) -> ctxA == Just s0A && ctxB == s0B
+    -- 2) add candidates GT (s0,s1)
+    go m bwd fwd = case break (== pp) fwd of
+      (gap, []) -> (m, reverse bwd ++ gap) -- end
+      (gap, _pp:fwd') -> assert (_pp == pp) $ case (bwd', geS1) of
+        (prev:_, _s1:gtS1) -> assert (_s1 == s1) $ case prev of
+          (Nothing, s) | s == s0 -> matched
+                       | otherwise -> noMatch
 
-        match1 = -- we could compare full (Maybe Int, Int) but targets +
-                 -- pp fully determine contexts so it's unnecessary
-          (snd <$> fwd1) == pattern1
-        
-        maxHead = R.maxHead rs tgt fwd --------- might go beyond s1
-        
-        fwd1 = take len1 fwd
-        rightSymbols = R.resolveFwd rs fwdRest
+          (Just sA, sB) | sB == s0 -> matched
+                        | s <- R.constr rs prev
+                        , s == s0 -> matched
+                        | otherwise -> noMatch
+          where
+            (headRest,fwd'') = splitAt (length gtS1) fwd'
+            bwd'' = revAppend headRest $
+                    (Just s0, s1):bwd'
 
-    -- [pre1..s1] (not null)
-    pattern1 = assertId (not . null) $
-               reverse $
-               takeUntil (== ppp1) $
-               R.prefixes rs s1
+            maxCtx = R.constr rs prev
 
-    len1 = length pattern1
+            matched = flip2 go bwd'' fwd'' $ runST $ do
+              ref <- newSTRef m
 
+              -- update map...
+
+              readSTRef ref
+
+            -- filter (fst pp <=) (snd prev:[maxCtx])
+            ctxGE = maybe id (filter . (<=)) (fst pp) $
+                    ---------- FIXME ----------
+                    (if isJust (fst prev) then (snd prev:) else id)
+                    [maxCtx]
+
+        _noPrevOrNoS1 -> noMatch
+
+        where
+          noMatch = go m (pp:bwd') fwd' -- move by whole head?
+
+          bwd' = revAppend gap bwd
+          maxHead = R.maxHead rs (snd pp) fwd'
+
+          -- [ppTgt, ..., s1?, ..., maxHead]
+          constrs = dropWhile (/= snd pp) $
+                    reverse $ -- small to large
+                    R.prefixes rs maxHead
+
+          -- [ppTgt, ...][s1, ..., maxHead]
+          (ltS1,geS1) = break (== s1) constrs
