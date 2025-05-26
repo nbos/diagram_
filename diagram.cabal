@@ -60,19 +60,11 @@ executable diagram
     -- Modules included in this executable, other than Main.
     other-modules:    Diagram
                       Diagram.Bits
-                      Diagram.Trie
                       Diagram.Rules
                       Diagram.Model
                       Diagram.Dynamic
                       Diagram.Streaming
                       Diagram.Util
-
-                      Data.Trie
-                      Data.Trie.Convenience
-                      Data.Trie.Internal
-                      Data.Trie.Internal.Errors
-                      Data.Trie.Internal.ByteString
-                      Data.Trie.Internal.BitTwiddle
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -100,7 +92,6 @@ executable diagram
     -- Directories containing source files.
     hs-source-dirs:   app
                     , src
-                    , lib/bytestring-trie/src
 
     -- Base language which the package is written in.
     default-language: Haskell2010
