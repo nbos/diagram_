@@ -95,11 +95,14 @@ invLookup rs s | s < 256   = Nothing
 withAsSnd :: Rules -> Int -> [Int]
 withAsSnd (Rules _ _ bss) s1 = IM.elems $ bss V.! s1
 
+constr :: Rules -> Int -> Int -> Int
+constr (Rules _ bfs _) s0 s1 = (bfs V.! s0) IM.! s1
+
 -- | Construct the greater symbol if the prediction is from a non-null
 -- context, else return the target symbol.
-constr :: Rules -> (Maybe Int, Int) -> Int
-constr _ (Nothing, tgt) = tgt
-constr (Rules _ bfs _) (Just s0, s1) = (bfs V.! s0) IM.! s1
+pConstr :: Rules -> (Maybe Int, Int) -> Int
+pConstr _ (Nothing, tgt) = tgt
+pConstr rs (Just s0, s1) = constr rs s0 s1
 
 -- | Deconstruct a symbol back into a list of bytes
 extension :: Rules -> Int -> [Word8]
@@ -136,42 +139,21 @@ toString = UTF8.toString
            . fmap fromIntegral
            .: extension
 
--- | Try to match the construction of a symbol s1 at the end of a list
--- of symbols given in reverse order. The patterns that produce a Just
--- are [s1,..], [s1B,s1A,..], [s1B,s1AB,s1AA,..],
--- [s1B,s1AB,s1AAB,s1AAA,..], and so on, where (sA,sB) are the
--- components of a constructed symbol s. Returns matched pattern in
--- reverse (i.e. back to normal orientation) (fst) and remainder of the
--- list (snd).
-matchBwd :: Rules -> Int -> [Int] -> Maybe ([Int], [Int])
-matchBwd rs = flip go []
-  where
-    go _ _ [] = Nothing
-    go s1 cPref1 (s:rest)
-      | s1 == s = Just (s1:cPref1, rest)
-      | otherwise = case invLookup rs s1 of
-          Just (sA,sB) | sB == s -> go sA (sB:cPref1) rest
-          _else -> Nothing
+-- | Given a list of predictions in reverse direction (last,
+-- second-to-last, etc.), return the 0-2 possible context symbols: the
+-- last target (if it exists) and the last prediction (if it exists) in
+-- that order.
+resolveBwd :: Rules -> [(Maybe Int, Int)] -> [Int]
+resolveBwd _ [] = []
+resolveBwd _ ((Nothing,s):_) = [s]
+resolveBwd rs ((Just sA, sB):_) = [sB, constr rs sA sB]
 
--- | Return all the symbols (large to small) that terminate at a given
--- context-target pair. Having the context there avoids doing the search
--- like resolution in the forwards direction
-resolveBwd :: Rules -> (Maybe Int, Int) -> [Int]
-resolveBwd rs = suffixes rs . constr rs
-
--- | Given a head symbol and subsequent predictions, return the largest
--- symbol (both in index and size) that can be constructed from the
--- leading symbols, i.e. recursively construct as long as possible
-maxHead :: Rules -> Int -> [(Maybe Int, Int)] -> Int
-maxHead (Rules _ bfs _) = go
-  where
-    go s pdns | ((Just s0, s1):rest) <- pdns
-              , s == s0 = go ((bfs V.! s0) IM.! s1) rest
-              | otherwise = s
-
--- | Return all the symbols that begin at the start of a list of
--- predictions (large to small) (head's context not included) (head's
--- prefixes included)
+-- | Return all symbols that can be constructed from the head symbols,
+-- starting with the head symbol (small to large), i.e. recursively
+-- construct as long as possible
 resolveFwd :: Rules -> [(Maybe Int, Int)] -> [Int]
 resolveFwd _ [] = []
-resolveFwd rs ((_,s0):rest) = prefixes rs $ maxHead rs s0 rest
+resolveFwd rs ((_,sym):predictions) = go sym predictions
+  where go s pdns | ((Just s0, s1):rest) <- pdns
+                  , s == s0 = s0 : go (constr rs s0 s1) rest
+                  | otherwise = [s]

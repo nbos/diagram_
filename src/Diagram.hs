@@ -74,111 +74,90 @@ fromPredictions :: Map (Int,Int) (Maybe Int, Int) -> Rules ->
                    [(Maybe Int, Int)] -> Candidates
 fromPredictions pps _ [] = (,0) <$> pps
 fromPredictions _ _ ((Just _,_):_) = err "impossible"
-fromPredictions pps rs ((Nothing,ctx0):pdns) = runST $ do
-  m <- newSTRef $ (minBound :: Int,) . (,0) <$> pps
-  go m 0 ctx0 pdns
-  snd <<$>> readSTRef m -- discard idxs
+fromPredictions pps rs ((Nothing,ctx0):pdns) = snd <$> go 0 ctx0 pdns m0
   where
+    m0 = (minBound :: Int,) . (,0) <$> pps
+
     -- | increment by 1 each from the cartesian product of symbols to
     -- the left greater or equal to the current context and symbols to
     -- the right greater or equal to the current target except the
     -- current pairing (minCtx,tgt)
-    go :: STRef s (Map (Int,Int) (Int, ((Maybe Int,Int), Int))) ->
-          Int -> Int -> [(Maybe Int,Int)] -> ST s ()
-    go _ _ _ [] = return () -- end
-    go m i maxCtx ((minCtx,tgt):rest) = do
-
-      -- inc anything greater than current
-      sequence_ [ inc m i s0 s1 | s0 <- ctxGE
-                                , s1 <- tgtGE
-                                , (Just s0, s1) /= (minCtx,tgt) ]
-
-      go m i' maxHead pdns' -- continue
-
+    go :: Int -> Int -> [(Maybe Int, Int)] ->
+          Map (Int, Int) (Int, ((Maybe Int, Int), Int)) ->
+          Map (Int, Int) (Int, ((Maybe Int, Int), Int))
+    go _ _ [] m = m
+    go i maxCtx ((minCtx,tgt):rest) m = go i' maxHead pdns' m'
         where
           -- filter (ctx <=) (maxCtxB:[maxCtx])
           ctxGE = maybe id (filter . (<=)) minCtx $
-                  maybe id ((:) . snd) (R.invLookup rs maxCtx) -- FIXME /!\
+                  maybe id ((:) . snd) (R.invLookup rs maxCtx) -- FIXME !!!
                   [maxCtx]
-            -- case R.invLookup rs maxCtx of
-            -- Nothing -> [maxCtx]
-            -- Just (_, maxCtxB) -> case ctx of
-            --   Nothing -> [maxCtxB, maxCtx]
-            --   Just ctxS | ctxS == maxCtxB -> [maxCtxB, maxCtx]
-            --                | ctxS == maxCtx -> [maxCtx]
-            --                | otherwise -> err "impossible"
 
-          maxHead = R.maxHead rs tgt rest
+          maxHead = undefined -- R.maxHead rs tgt rest -- FIXME
           tgtGE = takeUntil (== tgt) $
                   R.prefixes rs maxHead
+
+          -- inc anything greater than current
+          m' = L.foldl' (flip id) m
+               [ inc rs i s0 s1 | s0 <- ctxGE
+                                , s1 <- tgtGE
+                                , (Just s0, s1) /= (minCtx,tgt) ]
 
           headLen = length tgtGE
           i' = i + headLen
           pdns' = drop (headLen - 1) rest
 
-    -- | increment (s0,s1) candidate by 1, if constructable
-    inc :: STRef s (Map (Int,Int) (Int, ((Maybe Int,Int), Int))) ->
-           Int -> Int -> Int -> ST s ()
-    inc m i s0 s1 =
-      modifySTRef m $
-      flip M.adjust (s0,s1) $ \e@(lastChunked,(pp@(_,pre1),n)) ->
-      let -- [s1..]pre1 (null iff s1 == pre1)
-          inter1 = takeWhile (/= pre1) $ R.prefixes rs s1
-          constructable = i - length inter1 > lastChunked
-      in if constructable then (i,(pp,n+1)) else e
+-- | increment (s0,s1) candidate by 1, if constructable
+inc :: Rules -> Int -> Int -> Int ->
+       Map (Int,Int) (Int, ((Maybe Int,Int), Int)) ->
+       Map (Int,Int) (Int, ((Maybe Int,Int), Int))
+inc rs i s0 s1 =
+  flip M.adjust (s0,s1) $ \e@(lastChunked,(pp,n)) ->
+  let -- [s1..](snd pp) (null iff s1 == snd pp)
+      inter1 = takeWhile (/= snd pp) $ R.prefixes rs s1
+      constructable = i - length inter1 > lastChunked
+  in if constructable then (i,(pp,n+1)) else e
 
-updateCandidates :: Rules -> Int -> (Int, Int) -> (Maybe Int, Int) ->
+-- | increment (s0,s1) candidate by 1, if constructable
+dec :: Rules -> Int -> Int -> Int ->
+       Map (Int,Int) (Int, ((Maybe Int,Int), Int)) ->
+       Map (Int,Int) (Int, ((Maybe Int,Int), Int))
+dec rs i s0 s1 =
+  flip M.adjust (s0,s1) $ \e@(lastChunked,(pp,n)) ->
+  let -- [s1..](snd pp) (null iff s1 == snd pp)
+      inter1 = takeWhile (/= snd pp) $ R.prefixes rs s1
+      constructable = i - length inter1 > lastChunked
+  in if constructable then (i,(pp,n+1)) else e
+
+updateCandidates :: Rules -> (Int, Int) -> (Maybe Int, Int) ->
                     Candidates -> [(Maybe Int, Int)] ->
                     (Candidates, [(Maybe Int, Int)])
-updateCandidates rs n (s0,s1) pp = flip go []
+updateCandidates rs (s0,s1) pp = flip (go 0 [])
+                                 . fmap (minBound,)
   where
-    dec :: STRef s Candidates -> Int -> Int -> ST s ()
-    dec ref s0 s1 = undefined
+    go _ bwd [] m = (snd <$> m, reverse bwd) -- end
+    go i bwd (p:fwd) m
+      | p == pp
+      , Just is0 <- L.elemIndex s0 ctxs
+      , Just is1 <- L.elemIndex s1 tgts =
+          let ctxs01 = R.resolveBwd rs $ drop (is0+1) bwd
+              tgts01 = R.resolveFwd rs $ drop (is1+1) fwd
+              ctxsGE = maybe id (filter . (<=)) (fst pp) ctxs
 
-    -- 2) add candidates GT (s0,s1)
-    go m bwd fwd = case break (== pp) fwd of
-      (gap, []) -> (m, reverse bwd ++ gap) -- end
-      (gap, _pp:fwd') -> assert (_pp == pp) $ case (bwd', geS1) of
-        (prev:_, _s1:gtS1) -> assert (_s1 == s1) $ case prev of
-          (Nothing, s) | s == s0 -> matched
-                       | otherwise -> noMatch
+              m' = L.foldl' (flip id) m $
+                   dec rs i s0 s1 :
+                   -- rm candidates GT pp && LE (s0,s1)
+                   [ dec rs i c t | c <- ctxsGE -- ctx GE pp's
+                                  , t <- tgts -- tgt GE pp's
+                                  , (Just c, t) /= pp -- not EQ
+                                  , c < s0 || t < s1 ] -- LT (s0,s1)
+                   ++ -- add candidates with s01 as CTX or TGT
+                   [ id ] -- FIXME
 
-          (Just sA, sB) | sB == s0 -> matched
-                        | s <- R.constr rs prev
-                        , s == s0 -> matched
-                        | otherwise -> noMatch
-          where
-            (headRest,fwd'') = splitAt (length gtS1) fwd'
-            bwd'' = revAppend headRest $
-                    (Just s0, s1):bwd'
+          in go (i+1) ((Just s0,s1):bwd) fwd m'
 
-            maxCtx = R.constr rs prev
-
-            matched = flip2 go bwd'' fwd'' $ runST $ do
-              ref <- newSTRef m
-
-              -- update map...
-
-              readSTRef ref
-
-            -- filter (fst pp <=) (snd prev:[maxCtx])
-            ctxGE = maybe id (filter . (<=)) (fst pp) $
-                    ---------- FIXME ----------
-                    (if isJust (fst prev) then (snd prev:) else id)
-                    [maxCtx]
-
-        _noPrevOrNoS1 -> noMatch
-
-        where
-          noMatch = go m (pp:bwd') fwd' -- move by whole head?
-
-          bwd' = revAppend gap bwd
-          maxHead = R.maxHead rs (snd pp) fwd'
-
-          -- [ppTgt, ..., s1?, ..., maxHead]
-          constrs = dropWhile (/= snd pp) $
-                    reverse $ -- small to large
-                    R.prefixes rs maxHead
-
-          -- [ppTgt, ...][s1, ..., maxHead]
-          (ltS1,geS1) = break (== s1) constrs
+      | otherwise =
+          go (i+1) (p:bwd) fwd m
+      where
+        ctxs = R.resolveBwd rs bwd
+        tgts = R.resolveFwd rs (pp:fwd)
