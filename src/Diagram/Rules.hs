@@ -3,13 +3,14 @@
 -- | Construction rules
 module Diagram.Rules (module Diagram.Rules) where
 
-import Prelude hiding (length)
+import Prelude
 
 import Control.Monad (forM_)
 import Control.Monad.ST (runST)
 import Control.Exception (assert)
 
 import Data.Word (Word8)
+import Data.List.Extra (list)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
 import qualified Data.Vector as B
@@ -148,6 +149,12 @@ resolveBwd _ [] = []
 resolveBwd _ ((Nothing,s):_) = [s]
 resolveBwd rs ((Just sA, sB):_) = [sB, constr rs sA sB]
 
+resolveBwd' :: Rules -> [Int] -> [Int]
+resolveBwd' _ [] = []
+resolveBwd' rs (s:_) = case invLookup rs s of
+  Nothing -> [s]
+  Just (_, sB) -> [sB, s]
+
 -- | Return all symbols that can be constructed from the head symbols,
 -- starting with the head symbol (small to large), i.e. recursively
 -- construct as long as possible
@@ -155,5 +162,65 @@ resolveFwd :: Rules -> [(Maybe Int, Int)] -> [Int]
 resolveFwd _ [] = []
 resolveFwd rs ((_,sym):predictions) = go sym predictions
   where go s pdns | ((Just s0, s1):rest) <- pdns
-                  , s == s0 = s0 : go (constr rs s0 s1) rest
+                  , s == s0 = s : go (constr rs s0 s1) rest
                   | otherwise = [s]
+
+resolveFwd' :: Rules -> [Int] -> [Int]
+resolveFwd' rs ss = case fst $ splitHeadFwd rs ss of
+  [] -> []
+  (pp:rest) -> maybe pp snd (invLookup rs pp) : rest
+
+-- | Take symbols from a list as long as they construct with the
+-- accumulated head, starting with the target of the first symbol
+splitHeadFwd :: Rules -> [Int] -> ([Int],[Int])
+splitHeadFwd _ [] = ([],[])
+splitHeadFwd rs (pp:ss0) = let (hd0,tl0) = go s0 ss0
+                           in (pp:hd0,tl0)
+  where
+    s0 = maybe pp snd $ invLookup rs pp
+    go _ [] = ([],[])
+    go sA (s:ss) | Just (sA',_) <- invLookup rs s
+                 , sA == sA' = let (hd,tl) = go s ss
+                               in (s:hd, tl)
+                 | otherwise = ([], s:ss)
+
+-- | Take the first symbol and all its following prefixes (large to
+-- small) from a reversed list of predictions, down to the pp
+splitHeadBwd :: Rules -> [Int] -> ([Int],[Int])
+splitHeadBwd _ [] = ([],[])
+splitHeadBwd rs (s0:ss0) = let (hd0,tl0) = go s0 ss0
+                           in (s0:hd0, tl0)
+  where go _ [] = ([],[])
+        go s (sA':ss) = case invLookup rs s of
+          Nothing -> ([], sA':ss) -- atomic, s is pp
+          Just (sA,_)
+            | sA' == sA -> let (hd,tl) = go sA ss
+                           in (s:hd, tl)
+            | otherwise ->
+                assert ((snd <$> invLookup rs sA') == Just s)
+                ([sA'], ss) -- sA' is pp
+
+-- | Return the constructive interval between two symbols, assuming the
+-- first is a prefix of the second. The result is guaranteed to start
+-- with lo and end with hi, like a range.
+consInterval :: Rules -> Int -> Int -> [Int]
+consInterval rs lo hi = go hi [hi]
+  where
+    go s acc | s == lo = acc
+             | otherwise = case invLookup rs s of
+                 Nothing -> error $ "not an interval: " ++ show (lo,hi)
+                 Just (sA,_) -> go sA $ sA:acc
+
+-- | Given a symbol and its predecessor prediction (pp), return the
+-- chunked extension of the symbol in a string with the given rule
+-- set. This is equivalent to the constructive interval from the target
+-- part of the pp and the symbol (inclusive), with pp in the head
+-- instead.
+consExtension :: Rules -> Int -> Int -> [Int]
+consExtension rs s pp = pp : tail consIl
+  where
+    ppTgt = maybe pp snd $ invLookup rs pp
+    consIl = consInterval rs ppTgt s
+
+extLen :: Rules -> Int -> Int -> Int
+extLen = length .:. consExtension
