@@ -87,6 +87,12 @@ infixl 9 !
 
 -- | Lookup the rule for constructing a given symbol. Nothing returned
 -- if the given symbol is atomic (<256) or not yet defined
+(!?) :: Rules -> Int -> Maybe (Int,Int)
+(!?) = invLookup
+infixl 9 !?
+
+-- | Lookup the rule for constructing a given symbol. Nothing returned
+-- if the given symbol is atomic (<256) or not yet defined
 invLookup :: Rules -> Int -> Maybe (Int,Int)
 invLookup rs s | s < 256   = Nothing
                | otherwise = Just $ rs ! s
