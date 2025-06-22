@@ -87,44 +87,66 @@ countCandidates = L.foldl' f M.empty .: listCandidates
 
 substituteWith :: Rules -> (Int,Int) -> Int -> Int -> [Head] -> [Head]
 substituteWith rs (s0,s1) s01 pp = case R.invLookup rs pp of
-      -- Case: pp is atomic and necessarily begins s1's head
-      Nothing -> go2 (\h0 h1 -> snd h0 == s0 && fst h1 == pp)
-      -- Case: pp is composite
-      Just (ppA,_)
-        -- Case: pp follows s0 in its head (pp ends s0's head)
-        | ppA == s0 -> go2 (\h0 _ -> snd h0 == pp && fst h0 /= pp)
-        -- Case: pp is in a different (third) head than s0 and s1,
-        -- between s0's and s1's head
-        | otherwise -> go3
-  where
-    go3 :: [Head] -> [Head]
-    go3 [] = []
-    go3 [h] = [h]
-    go3 [h0,h1] = [h0,h1]
-    go3 (h0:ih:h1:hs) | snd h0 == s0
-                      , ih == (pp,pp)
-                      , s1 `elem` R.prefixes rs (snd h1) =
-                          if null rh1B then h0':go3 hs
-                          else h0':go3 (h1':hs)
-                      | otherwise = h0 : go3 (ih:h1:hs)
-          where
-            (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
-            h0' = s01 <$ h0
-            h1' = (last rh1B, head rh1B)
+      -- Case: pp is atomic and necessarily begins h1
+      Nothing -> go
+        where go [] = []
+              go [h] = [h]
+              go (h0:h1:hs) | snd h0 == s0
+                            , fst h1 == pp
+                            , s1 `elem` R.prefixes rs (snd h1) =
+                                if null rh1B then h0':go hs
+                                else h0':go (h1':hs)
+                            | otherwise = h0:go (h1:hs)
+                where
+                  (rh1B,_) = -- large to small
+                    span (/= s1) $ unpack rs h1
+                  h0' = s01 <$ h0
+                  h1' = (last rh1B, head rh1B)
 
-    go2 :: (Head -> Head -> Bool) -> [Head] -> [Head]
-    go2 cond = go
-      where
-        go [] = []
-        go [h] = [h]
-        go (h0:h1:hs) | cond h0 h1
-                      , s1 `elem` R.prefixes rs (snd h1) =
-                          if null rh1B then h0':go hs
-                          else h0':go (h1':hs)
-                      | otherwise = h0:go (h1:hs)
-          where
-            (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
-            -- h1A = reverse rh1A -- small to large: [pp..s1]
-            -- h1B = reverse rh1B -- small to large: s1[..]
-            h0' = s01 <$ h0
-            h1' = (last rh1B, head rh1B)
+      -- Case: pp ends h0, right after s0
+      Just (ppA,_) | ppA == s0 -> go
+        where go [] = []
+              go [h] = [h]
+              go (h0:h1:hs) | snd h0 == pp
+                            , fst h0 /= pp
+                            , s1 `elem` R.prefixes rs (snd h1) =
+                                if null rh1B then h0':go hs
+                                else h0':go (h1':hs)
+                            | otherwise = h0:go (h1:hs)
+                where
+                  (rh1B,_) = -- large to small
+                    span (/= s1) $ unpack rs h1
+                  h0' = s01 <$ h0
+                  h1' = (last rh1B, head rh1B)
+
+      -- Case pp begins h1 where s1 is not exercised but only produced
+      -- by pp, i.e. the presence of pp implies the presence of s1
+      Just (_,ppB) | ppB == s1 -> go
+        where go [] = []
+              go [h] = [h]
+              go (h0:h1:hs) | snd h0 == s0
+                            , fst h1 == pp =
+                                if null rh1B then h0':go hs
+                                else h0':go (h1':hs)
+                            | otherwise = h0:go (h1:hs)
+                where
+                  rh1B = init $ unpack rs h1 -- large to small
+                  h0' = s01 <$ h0
+                  h1' = (last rh1B, head rh1B)
+
+      -- Case: pp is in a singleton head between h0 and h1
+      Just _ -> go
+        where go [] = []
+              go [h] = [h]
+              go [h0,h1] = [h0,h1]
+              go (h0:ih:h1:hs) | snd h0 == s0
+                               , ih == (pp,pp) -- singleton
+                               , s1 `elem` R.prefixes rs (snd h1) =
+                                   if null rh1B then h0':go hs
+                                   else h0':go (h1':hs)
+                               | otherwise = h0 : go (ih:h1:hs)
+                where
+                  (rh1B,_) = -- large to small
+                    span (/= s1) $ unpack rs h1
+                  h0' = s01 <$ h0
+                  h1' = (last rh1B, head rh1B)
