@@ -10,7 +10,7 @@ import Control.Monad.ST (runST)
 import Control.Exception (assert)
 
 import Data.Word (Word8)
-import Data.List.Extra (list)
+import Data.Tuple.Extra
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
 import qualified Data.Vector as B
@@ -72,8 +72,9 @@ fromList l = Rules irs bfs bss
 -- | Add a new symbol with a construction rule. Returns updated rules
 -- and index of new symbol. O(n)
 push :: (Int, Int) -> Rules -> (Int, Rules)
-push s0s1@(s0,s1) rs@(Rules irs pcs scs) = assert (both (< s01) s0s1)
-                                           (s01, Rules irs' pcs' scs')
+push s0s1@(s0,s1) rs@(Rules irs pcs scs) =
+  assert (uncurry (&&) $ both (< s01) s0s1)
+  (s01, Rules irs' pcs' scs')
   where
     s01 = numSymbols rs
     irs' = V.snoc irs s0s1

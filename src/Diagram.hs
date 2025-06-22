@@ -11,6 +11,7 @@ import Control.Monad.ST
 
 import Data.STRef
 import Data.Maybe
+import Data.Tuple.Extra
 import qualified Data.List as L
 
 import Data.Map.Strict (Map)
@@ -26,41 +27,66 @@ import Diagram.Util
 err :: [Char] -> a
 err = error . ("Diagram: " ++)
 
-fromAtoms :: [Int] -> [[Int]]
-fromAtoms = fmap (:[])
+type Symbol = Int
+-- | A pair of symbols appearing immediately after one another
+type Joint = (Symbol,Symbol)
+-- | Isomorphic to a list of successive predictions where each
+-- subsequent prediction is predicated on the last:
+-- (((((x,x),x),x),x),x), etc.
+type Head = (Symbol,Symbol)
 
-listCandidates :: Rules -> [[Int]] -> [(Int,Int)]
+fromAtoms :: [Int] -> [Head]
+fromAtoms = fmap dupe
+
+-- | Return @True@ iff the constructive interval begins and ends on the
+-- same symbol
+single :: Head -> Bool
+single = uncurry (==)
+
+-- | Project into the symbol if there is only one
+getSingle :: Head -> Maybe Int
+getSingle (sMin,sMax) | sMin == sMax = Just sMin
+                      | otherwise = Nothing
+
+listCandidates :: Rules -> [Head] -> [Joint]
 listCandidates _ [] = []
-listCandidates rs (h0:hs0)
-  | length h0 > 1 = go ctx0A ctx0 hs0
-  | otherwise = case hs0 of
-      [] -> []
-      h1:hs1 | length h1 > 1 -> ((s0,) <$> h1) ++ go ctx1A ctx1 hs1
-             | otherwise -> (s0,s1) : go s0 s1 hs1
-        where
-          s0 = head h0 -- h0 singleton
-          s1 = head h1 -- h1 singleton
-          ctx1 = last h1
-          (ctx1A,_) = rs R.! ctx1
+listCandidates _ [_] = []
+listCandidates rs (h0:h1:heads)
+  | uncurry (/=) h0 = let ctx = snd h0
+                          (octx,_) = rs R.! ctx
+                      in go octx ctx (h1:heads)
+
+  | uncurry (/=) h1 = let ctx = snd h1
+                          (octx,_) = rs R.! ctx
+                          ps1 = takeUntil (== fst h1) (R.prefixes rs ctx)
+                      in ((s0,) <$> ps1) ++ go octx ctx (h1:heads)
+
+  | otherwise = (s0,s1) : go s0 s1 heads
   where
-    ctx0 = last h0
-    (ctx0A,_) = rs R.! ctx0
+    s0 = assert (uncurry (==) h0) $ fst h0 -- h0 singleton
+    s1 = assert (uncurry (==) h1) $ fst h1 -- h1 singleton
 
+    go :: Int -> Int -> [(Int,Int)] -> [(Int, Int)]
     go _ _ [] = []
-    go octx ctx (h:hs) = ((left,) <$> right) ++ go octx' pn hs
+    go octx ctx (h:hs) = ((left,) <$> right) ++ go octx' (snd h) hs
       where
-        p0 = head h
-        pn = last h
-        octx' = if p0 == pn then ctx else fst (rs R.! pn)
-        ps = takeWhile (/= p0) $ R.prefixes rs pn
-        (left, right) = case R.invLookup rs p0 of
+        octx' = if uncurry (==) h then ctx else fst (rs R.! snd h)
+        ps = takeWhile (/= fst h) $ R.prefixes rs $ snd h
+        (left, right) = case R.invLookup rs (fst h) of
           Nothing -> (ctx, ps) -- no overlap
-          Just (s0,_) -> (octx, s0:ps) -- overlap
+          Just (sA,_) -> (octx, sA:ps) -- overlap
 
-countCandidates :: Rules -> [[Int]] -> Map (Int,Int) Int
+countCandidates :: Rules -> [Head] -> Map (Int,Int) Int
 countCandidates = L.foldl' f M.empty .: listCandidates
   where f m k = M.insertWith (+) k 1 m
 
 substituteWith :: Rules -> (Int,Int) -> Int -> Int -> [[Int]] -> [[Int]]
 substituteWith _ _ _ _ [] = []
-substituteWith rs (s0,s1) s01 pp (h0:hs0) = undefined
+substituteWith rs (s0,s1) s01 pp (h0:hs0) = case R.invLookup rs pp of
+  Nothing -> goA
+  Just (ppA,ppB) -> goC
+  where
+    -- pp atomic, last head0 * elem head1 => head0'
+    goA = undefined
+    -- pp composite
+    goC = undefined

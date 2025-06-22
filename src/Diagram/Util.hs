@@ -6,6 +6,7 @@ import Control.Exception
 import System.IO.Unsafe
 
 import Data.Maybe
+import Data.Tuple.Extra
 import qualified Data.Bits as B
 import qualified Data.List.Extra as L
 
@@ -589,14 +590,6 @@ flip5 = flip2 .:: flip3
 -- Tuples  --
 -------------
 
-both :: (a -> Bool) -> (a, a) -> Bool
-both = uncurry (&&) .: mapBoth
-{-# INLINE both #-}
-
-eitherIs :: (a -> Bool) -> (a, a) -> Bool
-eitherIs = uncurry (||) .: mapBoth
-{-# INLINE eitherIs #-}
-
 mapFst :: (a -> c) -> (a, b) -> (c, b)
 mapFst f (a, b) = (f a, b)
 {-# INLINE mapFst #-}
@@ -616,14 +609,6 @@ mapSnd f (a, b) = (a, f b)
 toSnd :: (a -> b) -> a -> (a, b)
 toSnd f a = (a, f a)
 {-# INLINE toSnd #-}
-
-mapBoth :: (a -> b) -> (a, a) -> (b, b)
-mapBoth f (a, b) = (f a, f b)
-{-# INLINE mapBoth #-}
-
-dupe :: a -> (a,a)
-dupe a = (a,a)
-{-# INLINE dupe #-}
 
 sortPairBy :: (a -> a -> Ordering) -> a -> a -> (a, a)
 sortPairBy f a b | GT <- f a b = (b,a)
