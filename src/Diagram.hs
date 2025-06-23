@@ -73,13 +73,17 @@ listCandidates rs (h0:h1:heads)
 
     go :: Int -> Int -> [(Int,Int)] -> [(Int, Int)]
     go _ _ [] = []
-    go octx ctx (h:hs) = ((left,) <$> right) ++ go octx' (snd h) hs
+    go octx ctx (h:hs) = [ (a,b) | a <- left, b <- right ]
+                         ++ go octx' (snd h) hs
       where
         octx' = if uncurry (==) h then ctx else fst (rs R.! snd h)
         ps = unpack rs h
         (left, right) = case R.invLookup rs (fst h) of
-          Nothing -> (ctx, ps) -- no overlap
-          Just (sA,_) -> (octx, sA:ps) -- overlap
+          Nothing -> -- no overlap
+            case R.invLookup rs ctx of
+              Nothing -> ([ctx], ps)
+              Just (_,ctxB) -> ([ctx,ctxB], ps)
+          Just (sA,_) -> ([octx], sA:ps) -- overlap
 
 countCandidates :: Rules -> [Head] -> Map (Int,Int) Int
 countCandidates = L.foldl' f M.empty .: listCandidates
