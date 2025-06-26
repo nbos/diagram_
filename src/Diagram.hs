@@ -93,134 +93,158 @@ countCandidates = L.foldl' f M.empty .: listCandidates
 
 substituteWith :: Rules -> (Int,Int) -> Int -> Int -> [Head] -> [Head]
 substituteWith rs (s0,s1) s01 pp = case R.invLookup rs pp of
-      -- Case: pp is atomic and necessarily begins h1
-      Nothing -> go
-        where go [] = []
-              go [h] = [h]
-              go (h0:h1:hs) | snd h0 == s0
-                            , fst h1 == pp
-                            , s1 `elem` R.prefixes rs (snd h1) =
-                                if null rh1B then h0':go hs
-                                else h0':go (h1':hs)
-                            | otherwise = h0:go (h1:hs)
-                where
-                  (rh1B,_) = -- large to small
-                    span (/= s1) $ unpack rs h1
-                  h0' = s01 <$ h0
-                  h1' = (last rh1B, head rh1B)
+  -- Case: pp is atomic and necessarily begins h1. No overlap between h0
+  -- and h1.
+  Nothing -> go
+    where go [] = []
+          go [h] = [h]
+          go (h0:h1:hs) | snd h0 == s0
+                        , fst h1 == pp
+                        , s1 `elem` R.prefixes rs (snd h1) =
+                            if null rh1B then h0':go hs
+                            else h0':go (h1':hs)
+                        | otherwise = h0:go (h1:hs)
+            where
+              (rh1B,_) = -- large to small
+                span (/= s1) $ unpack rs h1
+              h0' = s01 <$ h0
+              h1' = (last rh1B, head rh1B)
 
-      -- Case: pp ends h0, right after s0
-      Just (ppA,_) | ppA == s0 -> go
-        where go [] = []
-              go [h] = [h]
-              go (h0:h1:hs) | snd h0 == pp
-                            , fst h0 /= pp
-                            , s1 `elem` R.prefixes rs (snd h1) =
-                                if null rh1B then h0':go hs
-                                else h0':go (h1':hs)
-                            | otherwise = h0:go (h1:hs)
-                where
-                  (rh1B,_) = -- large to small
-                    span (/= s1) $ unpack rs h1
-                  h0' = s01 <$ h0
-                  h1' = (last rh1B, head rh1B)
+  -- Case: pp ends h0, right after s0. Symbol `snd pp` begins h1.
+  Just (ppA,_) | ppA == s0 -> go
+    where go [] = []
+          go [h] = [h]
+          go (h0:h1:hs) | snd h0 == pp
+                        , fst h0 /= pp
+                        , s1 `elem` R.prefixes rs (snd h1) =
+                            if null rh1B then h0':go hs
+                            else h0':go (h1':hs)
+                        | otherwise = h0:go (h1:hs)
+            where
+              (rh1B,_) = -- large to small
+                span (/= s1) $ unpack rs h1
+              h0' = s01 <$ h0
+              h1' = (last rh1B, head rh1B)
 
-      -- Case pp begins h1 where s1 is not exercised but only produced
-      -- by pp, i.e. the presence of pp implies the presence of s1
-      Just (_,ppB) | ppB == s1 -> go
-        where go [] = []
-              go [h] = [h]
-              go (h0:h1:hs) | snd h0 == s0
-                            , fst h1 == pp =
-                                if null rh1B then h0':go hs
-                                else h0':go (h1':hs)
-                            | otherwise = h0:go (h1:hs)
-                where
-                  rh1B = init $ unpack rs h1 -- large to small
-                  h0' = s01 <$ h0
-                  h1' = (last rh1B, head rh1B)
+  -- Case: pp begins h1 where s1 is not exercised but only produced by
+  -- pp, i.e. the presence of pp implies the presence of s1.
+  Just (_,ppB) | ppB == s1 -> go
+    where go [] = []
+          go [h] = [h]
+          go (h0:h1:hs) | snd h0 == s0
+                        , fst h1 == pp =
+                            if null rh1B then h0':go hs
+                            else h0':go (h1':hs)
+                        | otherwise = h0:go (h1:hs)
+            where
+              rh1B = init $ unpack rs h1 -- large to small
+              h0' = s01 <$ h0
+              h1' = (last rh1B, head rh1B)
 
-      -- Case: pp is in a singleton head between h0 and h1
-      Just _ -> go
-        where go [] = []
-              go [h] = [h]
-              go [h0,h1] = [h0,h1]
-              go (h0:ih:h1:hs) | snd h0 == s0
-                               , ih == (pp,pp) -- singleton
-                               , s1 `elem` R.prefixes rs (snd h1) =
-                                   if null rh1B then h0':go hs
-                                   else h0':go (h1':hs)
-                               | otherwise = h0:go (ih:h1:hs)
-                where
-                  (rh1B,_) = -- large to small
-                    span (/= s1) $ unpack rs h1
-                  h0' = s01 <$ h0
-                  h1' = (last rh1B, head rh1B)
+  -- Case: pp is in a singleton head overlapping both h0 and h1.
+  Just _ -> go
+    where go [] = []
+          go [h] = [h]
+          go [h0,h1] = [h0,h1]
+          go (h0:ih:h1:hs) | snd h0 == s0
+                           , ih == (pp,pp) -- singleton
+                           , s1 `elem` R.prefixes rs (snd h1) =
+                               if null rh1B then h0':go hs
+                               else h0':go (h1':hs)
+                           | otherwise = h0:go (ih:h1:hs)
+            where
+              (rh1B,_) = -- large to small
+                span (/= s1) $ unpack rs h1
+              h0' = s01 <$ h0
+              h1' = (last rh1B, head rh1B)
 
-update :: Rules -> (Int,Int) -> Int -> Int -> [Head] ->
+update :: Rules -> (Int,Int) -> Int -> Int -> Int -> [Head] ->
           (Map (Symbol,Symbol) Int, [Head])
-update rs (s0,s1) s01 pp = swap . S.lazily . runIdentity . S.toList .
+update rs (s0,s1) s01 pp n = swap . S.lazily . runIdentity . S.toList .
   case R.invLookup rs pp of
-    -- Case: pp is atomic and necessarily begins h1
-    Nothing -> go M.empty
-      where go m [] = return m
-            go m [h] = S.yield h >> return m
-            go m (h0:h1:hs) | snd h0 == s0
-                            , fst h1 == pp
-                            , s1 `elem` R.prefixes rs (snd h1) =
-                                if null rh1B then S.yield h0' >> go m hs
-                                else S.yield h0' >> go m (h1':hs)
-                            | otherwise = S.yield h0 >> go m (h1:hs)
-              where
-                (rh1B,_) = -- large to small
-                  span (/= s1) $ unpack rs h1
-                h0' = s01 <$ h0
-                h1' = (last rh1B, head rh1B)
+    -- Case: pp is atomic and necessarily begins h1. No overlap between
+    -- h0 and h1.
+    Nothing -> go m0
+      where
+        ms0B = maybe [] ((:[]) . snd) $ rs R.!? s0
+        m0 = M.fromList [ ((a,b),-n) | a <- s0:ms0B
+                                     , b <- unpack rs (pp,s1) ]
+        go m [] = return m
+        go m [h] = S.yield h >> return m
+        go m (h0:h1:hs) | snd h0 == s0
+                        , fst h1 == pp
+                        , s1 `elem` R.prefixes rs (snd h1) =
+                            if null rh1B then S.yield h0' >> go m hs
+                            else S.yield h0' >> go m (h1':hs)
+                        | otherwise = S.yield h0 >> go m (h1:hs)
+          where
+            (rh1B,_) = -- large to small
+              span (/= s1) $ unpack rs h1
+            h0' = s01 <$ h0
+            h1' = (last rh1B, head rh1B)
 
-    -- Case: pp ends h0, right after s0
-    Just (ppA,_) | ppA == s0 -> go M.empty
-      where go m [] = return m
-            go m [h] = S.yield h >> return m
-            go m (h0:h1:hs) | snd h0 == pp
-                            , fst h0 /= pp
-                            , s1 `elem` R.prefixes rs (snd h1) =
-                                if null rh1B then S.yield h0' >> go m hs
-                                else S.yield h0' >> go m (h1':hs)
-                            | otherwise = S.yield h0 >> go m (h1:hs)
-              where
-                (rh1B,_) = -- large to small
-                  span (/= s1) $ unpack rs h1
-                h0' = s01 <$ h0
-                h1' = (last rh1B, head rh1B)
+    -- Case: pp ends h0, right after s0. Symbol `snd pp` begins h1.
+    Just (ppA,_) | ppA == s0 -> go m0
+      where
+        (_, ppB) = rs R.! pp
+        les1 = unpack rs (ppB, s1)
+        (_,h11B) = rs R.! (les1 !! 1)
+        m0 = M.fromList $ (,-n) <$> (pp, h11B) : ((s0,) <$> les1)
 
-    -- Case pp begins h1 where s1 is not exercised but only produced
-    -- by pp, i.e. the presence of pp implies the presence of s1
-    Just (_,ppB) | ppB == s1 -> go M.empty
-      where go m [] = return m
-            go m [h] = S.yield h >> return m
-            go m (h0:h1:hs) | snd h0 == s0
-                            , fst h1 == pp =
-                                if null rh1B then S.yield h0' >> go m hs
-                                else S.yield h0' >> go m (h1':hs)
-                            | otherwise = S.yield h0 >> go m (h1:hs)
-              where
-                rh1B = init $ unpack rs h1 -- large to small
-                h0' = s01 <$ h0
-                h1' = (last rh1B, head rh1B)
+        go m [] = return m
+        go m [h] = S.yield h >> return m
+        go m (h0:h1:hs) | snd h0 == pp
+                        , fst h0 /= pp
+                        , s1 `elem` R.prefixes rs (snd h1) =
+                            if null rh1B then S.yield h0' >> go m hs
+                            else S.yield h0' >> go m (h1':hs)
+                        | otherwise = S.yield h0 >> go m (h1:hs)
+          where
+            (rh1B,_) = -- large to small
+              span (/= s1) $ unpack rs h1
+            h0' = s01 <$ h0
+            h1' = (last rh1B, head rh1B)
 
-    -- Case: pp is in a singleton head between h0 and h1
-    Just _ -> go M.empty
-      where go m [] = return m
-            go m [h] = S.yield h >> return m
-            go m [h0,h1] = S.yield h0 >> S.yield h1 >> return m
-            go m (h0:ih:h1:hs) | snd h0 == s0
-                               , ih == (pp,pp) -- singleton
-                               , s1 `elem` R.prefixes rs (snd h1) =
-                                   if null rh1B then S.yield h0' >> go m hs
-                                   else S.yield h0' >> go m (h1':hs)
-                               | otherwise = S.yield h0 >> go m (ih:h1:hs)
-              where
-                (rh1B,_) = -- large to small
-                  span (/= s1) $ unpack rs h1
-                h0' = s01 <$ h0
-                h1' = (last rh1B, head rh1B)
+    -- Case: pp begins h1 where s1 is not exercised but only produced by
+    -- pp, i.e. the presence of pp implies the presence of s1.
+    Just (_,ppB) | ppB == s1 -> go m0
+      where
+        (s0A, s0B) = rs R.! s0
+        m0 = M.fromList $ (,-n) <$> [(s0A,pp),(s0,s1),(s0B,s1)]
+
+        go m [] = return m
+        go m [h] = S.yield h >> return m
+        go m (h0:h1:hs) | snd h0 == s0
+                        , fst h1 == pp =
+                            if null rh1B then S.yield h0' >> go m hs
+                            else S.yield h0' >> go m (h1':hs)
+                        | otherwise = S.yield h0 >> go m (h1:hs)
+          where
+            rh1B = init $ unpack rs h1 -- large to small
+            h0' = s01 <$ h0
+            h1' = (last rh1B, head rh1B)
+
+    -- Case: pp is in a singleton head overlapping both h0 and h1.
+    Just _ -> go m0
+      where
+        (s0A,s0B) = rs R.! s0
+        (_,ppB) = rs R.! pp
+        les1 = unpack rs (ppB, s1)
+        (_,h11B) = rs R.! (les1 !! 1)
+        m0 = M.fromList $ (,-n) <$> (s0A,pp):(pp,h11B):
+             [ (a,b) | a <- [s0,s0B], b <- les1 ]
+
+        go m [] = return m
+        go m [h] = S.yield h >> return m
+        go m [h0,h1] = S.yield h0 >> S.yield h1 >> return m
+        go m (h0:ih:h1:hs) | snd h0 == s0
+                           , ih == (pp,pp) -- singleton
+                           , s1 `elem` R.prefixes rs (snd h1) =
+                               if null rh1B then S.yield h0' >> go m hs
+                               else S.yield h0' >> go m (h1':hs)
+                           | otherwise = S.yield h0 >> go m (ih:h1:hs)
+          where
+            (rh1B,_) = -- large to small
+              span (/= s1) $ unpack rs h1
+            h0' = s01 <$ h0
+            h1' = (last rh1B, head rh1B)
