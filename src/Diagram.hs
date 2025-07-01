@@ -80,12 +80,10 @@ listCandidates rs (h0:h1:heads)
       where
         octx' = if uncurry (==) h then ctx else fst (rs R.! snd h)
         ps = unpack rs h
-        (left, right) = case R.invLookup rs (fst h) of
-          Nothing -> -- no overlap
-            case R.invLookup rs ctx of
-              Nothing -> ([ctx], ps)
-              Just (_,ctxB) -> ([ctx,ctxB], ps)
-          Just (sA,_) -> ([octx], sA:ps) -- overlap
+        (left, right)
+          | Just (sA,_) <- R.invLookup rs (fst h) = ([octx], sA:ps)
+          | Just (_,ctxB) <- R.invLookup rs ctx = ([ctx,ctxB], ps)
+          | otherwise = ([ctx], ps)
 
 countCandidates :: Rules -> [Head] -> Map (Int,Int) Int
 countCandidates = L.foldl' f M.empty .: listCandidates
@@ -96,60 +94,72 @@ substituteWith rs (s0,s1) s01 pp = case R.invLookup rs pp of
   -- Case: pp is atomic and necessarily begins h1. No overlap between h0
   -- and h1.
   Nothing -> go
-    where go [] = []
-          go [h] = [h]
-          go (h0:h1:hs) | snd h0 == s0
-                        , fst h1 == pp
-                        , s1 `elem` R.prefixes rs (snd h1) = h0':go hs'
-                        | otherwise = h0:go (h1:hs)
-            where
-              (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
-              h0' = s01 <$ h0 -- push s01
-              h1' = (last rh1B, head rh1B)
-              hs' = if null rh1B then hs else h1':hs
+    where
+      go [] = []
+      go [h] = [h]
+      go (h0:h1:hs)
+        | snd h0 == s0 || (snd <$> (rs R.!? snd h0)) == Just s0
+        , fst h1 == pp
+        , s1 `elem` R.prefixes rs (snd h1) = h0':go hs'
+        | otherwise = h0:go (h1:hs)
+        where
+          (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
+          h0' = s01 <$ h0 -- push s01
+          h1' = (last rh1B, head rh1B)
+          hs' | null rh1B = hs
+              | otherwise = h1':hs
 
   -- Case: pp ends h0, right after s0. Symbol `snd pp` begins h1.
   Just (ppA,_) | ppA == s0 -> go
-    where go [] = []
-          go [h] = [h]
-          go (h0:h1:hs) | snd h0 == pp
-                        , fst h0 /= pp
-                        , s1 `elem` R.prefixes rs (snd h1) = h0':go hs'
-                        | otherwise = h0:go (h1:hs)
-            where
-              (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
-              h0' = s01 <$ h0 -- push s01
-              h1' = (last rh1B, head rh1B)
-              hs' = if null rh1B then hs else h1':hs
+    where
+      go [] = []
+      go [h] = [h]
+      go (h0:h1:hs)
+        | snd h0 == pp
+        , fst h0 /= pp
+        , s1 `elem` R.prefixes rs (snd h1) = h0':go hs'
+        | otherwise = h0:go (h1:hs)
+        where
+          (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
+          h0' = s01 <$ h0 -- push s01
+          h1' = (last rh1B, head rh1B)
+          hs' | null rh1B = hs
+              | otherwise = h1':hs
 
   -- Case: pp begins h1 where s1 is not exercised but only produced by
   -- pp, i.e. the presence of pp implies the presence of s1.
   Just (_,ppB) | ppB == s1 -> go
-    where go [] = []
-          go [h] = [h]
-          go (h0:h1:hs) | snd h0 == s0
-                        , fst h1 == pp = h0':go hs'
-                        | otherwise = h0:go (h1:hs)
-            where
-              rh1B = init $ unpack rs h1 -- large to small
-              h0' = s01 <$ h0 -- push s01
-              h1' = (last rh1B, head rh1B)
-              hs' = if null rh1B then hs else h1':hs
+    where
+      go [] = []
+      go [h] = [h]
+      go (h0:h1:hs)
+        | snd h0 == s0
+        , fst h1 == pp = h0':go hs'
+        | otherwise = h0:go (h1:hs)
+        where
+          rh1B = init $ unpack rs h1 -- large to small
+          h0' = s01 <$ h0 -- push s01
+          h1' = (last rh1B, head rh1B)
+          hs' | null rh1B = hs
+              | otherwise = h1':hs
 
   -- Case: pp is in a singleton head overlapping both h0 and h1.
   Just _ -> go
-    where go [] = []
-          go [h] = [h]
-          go [h0,h1] = [h0,h1]
-          go (h0:ih:h1:hs) | snd h0 == s0
-                           , ih == (pp,pp) -- singleton
-                           , s1 `elem` R.prefixes rs (snd h1) = h0':go hs'
-                           | otherwise = h0:go (ih:h1:hs)
-            where
-              (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
-              h0' = s01 <$ h0 -- push s01
-              h1' = (last rh1B, head rh1B)
-              hs' = if null rh1B then hs else h1':hs
+    where
+      go [] = []
+      go [h] = [h]
+      go [h0,h1] = [h0,h1]
+      go (h0:ih:h1:hs)
+        | snd h0 == s0
+        , ih == (pp,pp) -- singleton
+        , s1 `elem` R.prefixes rs (snd h1) = h0':go hs'
+        | otherwise = h0:go (ih:h1:hs)
+        where
+          (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
+          h0' = s01 <$ h0 -- push s01
+          h1' = (last rh1B, head rh1B)
+          hs' | null rh1B = hs
+              | otherwise = h1':hs
 
 ------------------------------------------------------------------------
 
@@ -166,20 +176,25 @@ update rs (s0,s1) s01 pp n = swap . S.lazily . runIdentity . S.toList .
                                      , b <- unpack rs (pp,s1) ]
         go _ m [] = return m
         go _ m [h] = S.yield h >> return m
-        go bwd m (h0:h1:hs) | snd h0 == s0
-                            , fst h1 == pp
-                            , s1 `elem` R.prefixes rs (snd h1) =
-                                S.yield h0' >>
-                                go (h0':bwd) m hs'
-                            | otherwise =
-                                S.yield h0 >>
-                                go (h0:bwd) m (h1:hs)
+        go bwd m (h0:h1:hs)
+          | snd h0 == s0 || (snd <$> (rs R.!? snd h0)) == Just s0
+          , fst h1 == pp
+          , s1 `elem` R.prefixes rs (snd h1) = S.yield h0' >>
+                                               go (h0':bwd) m hs'
+          | otherwise = continue
           where
+            continue = S.yield h0 >> go (h0:bwd) m (h1:hs)
             (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
             h0' = s01 <$ h0 -- push s01
             h1' = (last rh1B, head rh1B)
-            hs' = if null rh1B then hs else h1':hs
-
+            hs' | null rh1B = hs
+                | otherwise = h1':hs
+            left0 | snd h0 == s0 = case bwd of
+                      [] -> []
+                      (hm1:bwd') -> undefined -- FIXME
+                  | otherwise =
+                      assert ((snd <$> (rs R.!? snd h0)) == Just s0)
+                      undefined -- FIXME
 
     -- Case: pp ends h0, right after s0. Symbol `snd pp` begins h1.
     Just (ppA,_) | ppA == s0 -> go [] m0
@@ -191,19 +206,19 @@ update rs (s0,s1) s01 pp n = swap . S.lazily . runIdentity . S.toList .
 
         go _ m [] = return m
         go _ m [h] = S.yield h >> return m
-        go bwd m (h0:h1:hs) | snd h0 == pp
-                            , fst h0 /= pp
-                            , s1 `elem` R.prefixes rs (snd h1) =
-                                S.yield h0' >>
-                                go (h0':bwd) m hs'
-                            | otherwise =
-                                S.yield h0 >>
-                                go (h0:bwd) m (h1:hs)
+        go bwd m (h0:h1:hs)
+          | snd h0 == pp
+          , fst h0 /= pp
+          , s1 `elem` R.prefixes rs (snd h1) = S.yield h0' >>
+                                               go (h0':bwd) m hs'
+          | otherwise = continue
           where
+            continue = S.yield h0 >> go (h0:bwd) m (h1:hs)
             (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
             h0' = s01 <$ h0 -- push s01
             h1' = (last rh1B, head rh1B)
-            hs' = if null rh1B then hs else h1':hs
+            hs' | null rh1B = hs
+                | otherwise = h1':hs
 
     -- Case: pp begins h1 where s1 is not exercised but only produced by
     -- pp, i.e. the presence of pp implies the presence of s1.
@@ -214,18 +229,18 @@ update rs (s0,s1) s01 pp n = swap . S.lazily . runIdentity . S.toList .
 
         go _ m [] = return m
         go _ m [h] = S.yield h >> return m
-        go bwd m (h0:h1:hs) | snd h0 == s0
-                            , fst h1 == pp =
-                                S.yield h0' >>
-                                go (h0':bwd) m hs'
-                            | otherwise =
-                                S.yield h0 >>
-                                go (h0:bwd) m (h1:hs)
+        go bwd m (h0:h1:hs)
+          | snd h0 == s0
+          , fst h1 == pp = S.yield h0' >>
+                           go (h0':bwd) m hs'
+          | otherwise = continue
           where
+            continue = S.yield h0 >> go (h0:bwd) m (h1:hs)
             rh1B = init $ unpack rs h1 -- large to small
             h0' = s01 <$ h0 -- push s01
             h1' = (last rh1B, head rh1B)
-            hs' = if null rh1B then hs else h1':hs
+            hs' | null rh1B = hs
+                | otherwise = h1':hs
 
     -- Case: pp is in a singleton head overlapping both h0 and h1.
     Just _ -> go [] m0
@@ -240,16 +255,23 @@ update rs (s0,s1) s01 pp n = swap . S.lazily . runIdentity . S.toList .
         go _ m [] = return m
         go _ m [h] = S.yield h >> return m
         go _ m [h0,h1] = S.yield h0 >> S.yield h1 >> return m
-        go bwd m (h0:ih:h1:hs) | snd h0 == s0
-                               , ih == (pp,pp) -- singleton
-                               , s1 `elem` R.prefixes rs (snd h1) =
-                                   S.yield h0' >>
-                                   go (h0':bwd) m hs'
-                               | otherwise =
-                                   S.yield h0 >>
-                                   go (h0:bwd) m (ih:h1:hs)
+        go bwd m (h0:ih:h1:hs)
+          | snd h0 == s0
+          , ih == (pp,pp) -- singleton head pp
+          , s1 `elem` R.prefixes rs (snd h1) = S.yield h0' >>
+                                               go (h0':bwd) m hs'
+          | otherwise = continue
           where
+            continue = S.yield h0 >> go (h0:bwd) m (ih:h1:hs)
             (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
             h0' = s01 <$ h0 -- push s01
             h1' = (last rh1B, head rh1B)
-            hs' = if null rh1B then hs else h1':hs
+            hs' | null rh1B = hs
+                | otherwise = h1':hs
+  where
+    go' f = go
+      where
+        go _ m [] = return m
+        go bwd m hs = case f hs of
+          Nothing -> undefined -- FIXME
+          Just _ -> undefined  -- FIXME
