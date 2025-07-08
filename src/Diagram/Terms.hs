@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE LambdaCase, TupleSections #-}
 {-# LANGUAGE RankNTypes, ScopedTypeVariables #-}
-module Diagram.Model (module Diagram.Model) where
+module Diagram.Terms (module Diagram.Terms) where
 
 import Control.Lens
 import Control.Exception (assert)
@@ -167,7 +167,8 @@ information :: Model -> Double
 information (Model _ t0 ts) = t0^.termRes + sumOf (folded.termRes) ts
 
 checkTerms :: Model -> a -> a
-checkTerms mdl@(Model rs t0 ts) = foldr ((.) . checkLineageOf) id [0..R.numSymbols rs]
+checkTerms mdl@(Model rs t0 ts) = foldr ((.) . checkLineageOf)
+                                  id [0..R.numSymbols rs]
   where
     checkLineageOf :: Int -> a -> a
     checkLineageOf s = -- check lineage starting w/ root
