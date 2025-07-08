@@ -246,33 +246,33 @@ insert (Model rs root terms) (s0,s1) n (suf0,pre1) = runST $ do
 -- symbol in the context (assumes a claim is there) and propagates
 -- implications for inheriting terms
 adjustCount :: MModel s -> Maybe Int -> Int -> (Int -> Int) -> ST s Double
-adjustCount (Model rs root ts) s0 s1 f = do
-  -- read root of the affected subtrie
-  t0 <- maybe (readSTRef root) (MV.read ts) s0
-  let (mOldCount1, t0') = t0 & termCoef.coefClaims
-        %%~ IM.updateLookupWithKey (\_ -> nothingIf (== 0) . f) s1
-      oldCount1 = fromMaybe 0 mOldCount1
-      newCount1 = f oldCount1
-      substRes = substCoefFactor oldCount1 newCount1
+adjustCount (Model rs root ts) s0 s1 f = do undefined
+  -- -- read root of the affected subtrie
+  -- t0 <- maybe (readSTRef root) (MV.read ts) s0
+  -- let (mOldCount1, t0') = t0 & termCoef.coefClaims
+  --       %%~ IM.updateLookupWithKey (\_ -> nothingIf (== 0) . f) s1
+  --     oldCount1 = fromMaybe 0 mOldCount1
+  --     newCount1 = f oldCount1
+  --     substRes = substCoefFactor oldCount1 newCount1
 
-      sc0s = maybe [0..255] (R.withAsSnd rs) s0
-      (d0, t0'') = substRes t0'
+  --     sc0s = maybe [0..255] (R.withAsSnd rs) s0
+  --     (d0, t0'') = substRes t0'
 
-  -- write root
-  maybe (writeSTRef root t0'') (flip (MV.write ts) t0'') s0
+  -- -- write root
+  -- maybe (writeSTRef root t0'') (flip (MV.write ts) t0'') s0
 
-  -- rec worker
-  let go s = do
-        t <- MV.read ts s
-        if s1 `IM.member` (t^.termCoef.coefClaims)
-          then return 0.0
-          else do let (d,t') = substRes t
-                  MV.write ts s t'
-                  ds <- forM (R.withAsSnd rs s) go -- rec
-                  return $ sum (d:ds)
+  -- -- rec worker
+  -- let go s = do
+  --       t <- MV.read ts s
+  --       if s1 `IM.member` (t^.termCoef.coefClaims)
+  --         then return 0.0
+  --         else do let (d,t') = substRes t
+  --                 MV.write ts s t'
+  --                 ds <- forM (R.withAsSnd rs s) go -- rec
+  --                 return $ sum (d:ds)
 
-  ds <- forM sc0s go -- propagate
-  return $ sum (d0:ds)
+  -- ds <- forM sc0s go -- propagate
+  -- return $ sum (d0:ds)
 
 -- | Update the coefficient of a term where a symbol had `oldCount` to
 -- one where it is `newCount`. Does not affect term claims, so works on
