@@ -20,13 +20,14 @@ import qualified Data.Vector.Generic.Mutable as MV
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 
+import Diagram.Head (Head)
 import Diagram.Util
 
 -- TODO: rm bySnd map (not used)
 
+-- | Self-referrential vector of recipes for the construction of all
+-- symbols above 256 indexed at s-256
 data Rules = Rules {
-  -- | Self-referrential vector of recipes for the construction of all
-  -- symbols above 256 indexed at s-256
   invRules :: !(U.Vector (Int,Int)),    -- s01 -> (s0,s1)
   byFst    :: !(B.Vector (IntMap Int)), -- s0 -> s1 -> s01
   bySnd    :: !(B.Vector (IntMap Int))  -- s1 -> s0 -> s01
@@ -231,3 +232,69 @@ consExtension rs s pp = pp : tail consIl
 
 extLen :: Rules -> Int -> Int -> Int
 extLen = length .:. consExtension
+
+-- | Unpack an interval representation of a head into the list of
+-- constructions, in reverse (from large to small), including both
+-- bounds
+unpack :: Rules -> Head -> [Int]
+unpack rs (sMin,sMax) = takeUntil (== sMin) $
+                        prefixes rs sMax
+
+-- | Given a ruleset and a new rule, rewrite a string represented as a
+-- list of heads into a list of equal size with Nothing's in the place
+-- of deleted heads.
+apply :: Rules -> (Int,Int) -> Int -> Int -> [Head] -> [Maybe Head]
+apply rs (s0,s1) s01 pp = case invLookup rs pp of
+  -- Case: pp is atomic and necessarily begins h1. No overlap between h0
+  -- and h1.
+  Nothing -> go2 f
+    where f h0 h1 = (snd h0 == s0
+                     || (snd <$> (rs !? snd h0)) == Just s0)
+                    && fst h1 == pp
+                    && s1 `elem` prefixes rs (snd h1)
+
+  -- Case: pp ends h0, right after s0. Symbol `snd pp` begins h1.
+  Just (ppA,_) | ppA == s0 -> go2 f
+    where f h0 h1 = snd h0 == pp
+                    && fst h0 /= pp
+                    && s1 `elem` prefixes rs (snd h1)
+
+  -- Case: pp begins h1 where s1 is not exercised but only produced by
+  -- pp, i.e. the presence of pp implies the presence of s1.
+  Just (_,ppB) | ppB == s1 -> go2 f
+    where f h0 h1 = snd h0 == s0
+                    && fst h1 == pp
+
+  -- Case: pp is in a singleton head overlapping both h0 and h1.
+  Just _ -> go3 f
+    where f h0 ih h1 = snd h0 == s0
+                       && ih == (pp,pp)
+                       && s1 `elem` prefixes rs (snd h1)
+  where
+    go2 f = go
+      where
+        go [] = []
+        go [h] = [Just h]
+        go (h0:h1:hs)
+          | f h0 h1 = Just h0' : (if null rh1B then Nothing : go hs
+                                  else go (h1':hs))
+          | otherwise = Just h0 : go (h1:hs)
+            where
+              (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
+              h0' = s01 <$ h0 -- push s01
+              h1' = (last rh1B, head rh1B) -- pack
+
+    go3 f = go
+      where
+        go [] = []
+        go [h] = [Just h]
+        go [h0,h1] = Just <$> [h0,h1]
+        go (h0:ih:h1:hs)
+          | f h0 ih h1 = Just h0' : Nothing :
+                         (if null rh1B then Nothing : go hs
+                          else go (h1':hs))
+          | otherwise = Just h0 : go (ih:h1:hs)
+            where
+              (rh1B,_) = span (/= s1) $ unpack rs h1 -- large to small
+              h0' = s01 <$ h0 -- push s01
+              h1' = (last rh1B, head rh1B) -- pack
