@@ -56,6 +56,10 @@ fromMultiset counts = Distribution n ks
          first fromJust <$> M.toAscList (M.delete Nothing m)
     n = kExit + sum ks
 
+-----------
+-- MODEL --
+-----------
+
 data Distributions = Distributions {
   rootDistr :: !Categorical,
   byLastSym :: !(B.Vector Distribution)
@@ -67,6 +71,10 @@ variety (Distributions root v) = Comb.multinomial (IM.elems root)
 
 codeLen :: Distributions -> Int
 codeLen = BV.bitLen . variety
+
+-------------------
+-- SERIALIZATION --
+-------------------
 
 -- | Represent a string of predictions (symbols) multiset permutations
 -- determining all transitions for each inference state (root
