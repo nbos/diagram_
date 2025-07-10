@@ -63,6 +63,7 @@ executable diagram
                       Diagram.Head
                       Diagram.Rules
                       Diagram.Terms
+                      Diagram.Variety
                       Diagram.Dynamic
                       Diagram.Streaming
                       Diagram.Candidates

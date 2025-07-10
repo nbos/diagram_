@@ -9,7 +9,7 @@ import Control.Monad.ST
 import Control.Monad
 
 import Data.STRef
-import Data.Maybe
+-- import Data.Maybe
 import qualified Data.List as L
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
@@ -26,7 +26,7 @@ import qualified Diagram.Rules as R
 import Diagram.Util
 
 err :: [Char] -> a
-err = error . ("Diagram.Model: " ++)
+err = error . ("Diagram.Terms: " ++)
 
 data Weight = Weight {
   _weightNum   :: !Int, -- ^ Number of times this distr. is sampled
