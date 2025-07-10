@@ -62,7 +62,6 @@ executable diagram
                       Diagram.Bits
                       Diagram.Head
                       Diagram.Rules
-                      Diagram.Terms
                       Diagram.Variety
                       Diagram.Dynamic
                       Diagram.Streaming
