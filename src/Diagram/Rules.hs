@@ -6,13 +6,18 @@ module Diagram.Rules (module Diagram.Rules) where
 import Prelude
 
 import Control.Exception (assert)
+import Control.Monad.ST
+import Control.Monad
 
 import Data.Word (Word8)
 import Data.Tuple.Extra
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
+
+import qualified Data.Vector as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
+import qualified Data.Vector.Generic.Mutable as MV
 
 import Diagram.Util
 
@@ -170,3 +175,20 @@ consExtension rs s pp = pp : tail consIl
 
 extLen :: Rules -> Int -> Int -> Int
 extLen = length .:. consExtension
+
+-------------
+-- AS FSTS --
+-------------
+
+-- | For every symbol, the list of composite symbols that have that
+-- symbol as first/left part.
+type AsFsts = B.Vector [Int]
+
+-- | For every symbol, the list of composite symbols that have that
+-- symbol as first/left part.
+asFsts :: Rules -> AsFsts
+asFsts rs = V.create $ do
+  mv <- MV.replicate (numSymbols rs) []
+  forM_ [256..numSymbols rs - 1] $ \s ->
+    MV.modify mv (s:) $ fst (rs ! s)
+  return mv

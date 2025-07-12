@@ -7,7 +7,7 @@ import Data.Tuple.Extra
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 
-import Diagram.Head (Head)
+import Diagram.Head (Head,Symbol)
 import qualified Diagram.Head as H
 import Diagram.Rules (Rules)
 import qualified Diagram.Rules as R
@@ -15,15 +15,42 @@ import qualified Diagram.Rules as R
 err :: [Char] -> a
 err = error . ("Diagram.Candidates: " ++)
 
+data Candidate = Candidate {
+  cParts :: !(Symbol,Symbol),
+  cPP :: !Symbol,
+  cCount :: !Int
+}
+
+data PPType = Atomic -- ^ Case: pp is atomic and necessarily begins
+                     -- h1. No overlap between h0 and h1.
+
+            | S0IsFst -- ^ Case: pp ends h0, right after s0. Symbol `snd
+                      -- pp` begins h1.
+
+            | S1IsSnd -- ^ Case: pp begins h1 where s1 is not exercised
+                      -- but only produced by pp, i.e. the presence of
+                      -- pp implies the presence of s1.
+
+            | SndS0AndFstS1 -- ^ Case: pp is in a singleton head
+                            -- overlapping both h0 and h1.
+
+ppType :: Rules -> Candidate -> PPType
+ppType rs (Candidate (s0,s1) pp _) = case rs R.!? pp of
+  Nothing -> Atomic
+  Just (ppA,_) | ppA == s0 -> S0IsFst
+  Just (_,ppB) | ppB == s1 -> S1IsSnd
+  Just _ -> SndS0AndFstS1 -- assert?
+
 -- | Given a ruleset and a new rule, rewrite a string represented as a
 -- list of heads and count the delta in candidates, returned in a map of
 -- delta counts (positive or negative, non-zero)
-updateString :: Rules -> (Int,Int) -> Int -> Int -> [Head] -> ( Map (Int,Int) Int
-                                                              , [Head] )
-updateString rs s0s1 s01 pp hs = ( M.filter (/= 0) $ M.unionsWith (+) ms
-                              , catMaybes mhs )
+updateString :: Rules -> Candidate -> Int -> [Head] -> ( Map (Int,Int) Int
+                                                       , [Head] )
+updateString rs cdt s01 hs =
+  ( M.filter (/= 0) $ M.unionsWith (+) ms
+  , catMaybes mhs )
   where
-    mhs = applyRule rs s0s1 s01 pp hs
+    mhs = applyRule rs cdt s01 hs
     chunks = deltaChunks [] $ zip hs mhs
     ms = (<$> chunks) $ \c ->
       let (shs,shs') = second catMaybes $ unzip c
@@ -48,30 +75,22 @@ updateString rs s0s1 s01 pp hs = ( M.filter (/= 0) $ M.unionsWith (+) ms
 -- | Given a ruleset and a new rule, rewrite a string represented as a
 -- list of heads into a list of equal size with Nothing's in the place
 -- of deleted heads.
-applyRule :: Rules -> (Int,Int) -> Int -> Int -> [Head] -> [Maybe Head]
-applyRule rs (s0,s1) s01 pp = case R.invLookup rs pp of
-  -- Case: pp is atomic and necessarily begins h1. No overlap between h0
-  -- and h1.
-  Nothing -> go2 f
+applyRule :: Rules -> Candidate -> Int -> [Head] -> [Maybe Head]
+applyRule rs cdt@(Candidate (s0,s1) pp _) s01 = case ppType rs cdt of
+  Atomic -> go2 f
     where f h0 h1 = (snd h0 == s0
                      || (snd <$> (rs R.!? snd h0)) == Just s0)
                     && fst h1 == pp
                     && s1 `elem` R.prefixes rs (snd h1)
-
-  -- Case: pp ends h0, right after s0. Symbol `snd pp` begins h1.
-  Just (ppA,_) | ppA == s0 -> go2 f
+  S0IsFst -> go2 f
     where f h0 h1 = snd h0 == pp
                     && fst h0 /= pp
                     && s1 `elem` R.prefixes rs (snd h1)
-
-  -- Case: pp begins h1 where s1 is not exercised but only produced by
-  -- pp, i.e. the presence of pp implies the presence of s1.
-  Just (_,ppB) | ppB == s1 -> go2 f
+  S1IsSnd -> go2 f
     where f h0 h1 = snd h0 == s0
                     && fst h1 == pp
 
-  -- Case: pp is in a singleton head overlapping both h0 and h1.
-  Just _ -> go3 f
+  SndS0AndFstS1 -> go3 f
     where f h0 ih h1 = snd h0 == s0
                        && ih == (pp,pp)
                        && s1 `elem` R.prefixes rs (snd h1)
