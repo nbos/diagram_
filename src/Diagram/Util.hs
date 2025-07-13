@@ -248,6 +248,8 @@ infixr 1 >.>
 -- Lists --
 -----------
 
+-- | Like takeWhile but also includes the item on which the predicate
+-- fails.
 takeUntil :: (a -> Bool) -> [a] -> [a]
 takeUntil p = foldr (\x ys -> x : if p x then [] else ys) []
 
