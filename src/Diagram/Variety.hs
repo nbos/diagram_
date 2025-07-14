@@ -1,12 +1,15 @@
+{-# LANGUAGE TupleSections #-}
 module Diagram.Variety (module Diagram.Variety) where
 
 import Control.Monad.ST
 import Control.Monad
 
 import Data.STRef
+import Data.Ratio
 import qualified Data.List as L
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
+import qualified Data.Map.Strict as M
 
 import qualified Data.Vector as B
 import qualified Data.Vector.Unboxed as U
@@ -16,6 +19,7 @@ import qualified Data.Vector.Generic.Mutable as MV
 import Streaming hiding (first)
 import qualified Streaming.Prelude as S
 
+import Math.Combinatorics.Exact.Factorial (factorial)
 import qualified Codec.Arithmetic.Combinatorics as Comb
 import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
@@ -48,35 +52,41 @@ import Diagram.Util
 type Counts = U.Vector Int
 
 data Model = Model {
-  headCount :: !Int,
   symbolRules :: !Rules,
-  symbolCounts :: !(U.Vector Int),
-  symbolConstrs :: !AsFsts
+  headCount :: !Int, -- root ctx n
+  symbolCounts :: !(U.Vector Int), -- ns
+  symbolAsFsts :: !(B.Vector [Int]), -- ixs of the ks
+  symbolNonConstrs :: !(U.Vector Int) -- n - sum ks
 }
 
 numSymbols :: Model -> Int
-numSymbols (Model _ rs _ _) = R.numSymbols rs
+numSymbols (Model rs _ _ _ _) = R.numSymbols rs
 
-rootDistr :: Model -> [(Int,Int)]
-rootDistr (Model _ _ ns _) = zip [0..] $ V.toList $ V.take 256 ns
+rootDistr :: Model -> (Int, [(Int, Int)])
+rootDistr (Model _ hc ns _ _) = (hc, sks)
+  where sks = filter ((>0) . snd) $
+              zip [0..] $ V.toList $ V.take 256 ns
 
-distr :: Model -> Int -> [(Maybe Int, Int)]
-distr (Model _ _ ns af) s = (Nothing, k'):
-                            zip (Just <$> saf) ks
+distr :: Model -> Int -> (Int, [(Maybe Int, Int)])
+distr (Model _ _ ns af nc) s = (n, sks)
   where
     n = ns V.! s
     saf = af V.! s
     ks = (ns V.!) <$> saf
-    k' = n - sum ks
+    sks = filter ((>0) . snd) $
+          (Nothing, nc V.! s) : zip (Just <$> saf) ks
 
-compositeDistrs :: Model -> [[(Maybe Int,Int)]]
+compositeDistrs :: Model -> [(Int, [(Maybe Int,Int)])]
 compositeDistrs mdl = distr mdl <$>
                       [256..numSymbols mdl - 1]
 
+multinomial :: (Int,[(s,Int)]) -> Integer
+multinomial (n,sks) = factorial n
+                      `div` product (factorial . snd <$> sks)
+
 variety :: Model -> Integer
-variety mdl = product $ Comb.multinomial . filter (>0) <$> distrs
-  where distrs = fmap snd (rootDistr mdl) :
-                 ffmap snd (compositeDistrs mdl)
+variety mdl = product $ multinomial (rootDistr mdl) :
+              (multinomial <$> compositeDistrs mdl)
 
 -- | Return a map containing multiples of -n for predictions that are
 -- supplanted by the introduction of the candidate and +n for the
@@ -97,18 +107,52 @@ deltaCounts rs c@(Candidate (_,s1) pp n) = case C.ppType rs c of
     dockN s = IM.insertWith (+) s (-n)
 
 insert :: Model -> Candidate -> (Int, Model)
-insert (Model hc rs ns af) c = (s01, Model hc' rs' ns' af')
+insert (Model rs hc ns af nc) c = (s01, Model rs' hc' ns' af' nc')
   where
     Candidate (s0,s1) _ _ = c
     (s01, rs') = R.push (s0,s1) rs
     deltas = IM.toAscList $ deltaCounts rs c
-    ns' = V.create $ do
-      mv <- V.unsafeThaw $ V.snoc ns 0
-      forM_ deltas $ \(s,delta) ->
-        MV.modify mv (+delta) s
-      return mv
-    af' = af V.// [(s0, s01:(af V.! s0))]
-    hc' = hc + sum (snd <$> takeWhile ((<256) . fst) deltas)
+    (hc', ns', nc') = runST $ do
+      hcref <- newSTRef hc -- sum $ take 256 $ ns
+      mnsv <- V.unsafeThaw $ V.snoc ns 0 -- n
+      mncv <- V.unsafeThaw $ V.snoc nc 0 -- n - sum ks
+      forM_ deltas $ \(s,delta) -> do
+        MV.modify mnsv (+delta) s
+        MV.modify mncv (+delta) s
+        case rs R.!? s of
+          Nothing -> modifySTRef hcref (+delta)
+          Just (sA,_) -> MV.modify mncv (+(-delta)) sA
+      nsv <- V.unsafeFreeze mnsv
+      ncv <- V.unsafeFreeze mncv
+      (, nsv, ncv) <$> readSTRef hcref
+    af' = af V.// [(s0, s01:(af V.! s0))] -- cons s01 at s0
+
+-- | Equivalent to deltaCodeLen in variety space, the factor to multiply
+-- the old variety to get the new variety after adding this candidate
+ratioVariety :: Model -> Candidate -> Ratio Integer
+ratioVariety (Model rs hc ns af nc) c =
+  let m = L.foldl' (flip id) M.empty $
+          (<$> IM.toList (deltaCounts rs c)) $ \(s, delta) ->
+        minsert (Just s) (M.singleton Nothing delta)
+        . minsert (fst <$> (rs R.!? s)) (M.singleton (Just s) delta)
+
+  in product $ (<$> M.toList m) $ \(ctx, ds) ->
+    let n = maybe hc (ns V.!) ctx -- hc is the n for the Nothing ctx
+        (ks,ks') = unzip $ (<$> M.toList ds) $ \(mp, d) -> case mp of
+          Nothing -> let
+            in undefined
+
+          Just p -> let k = ns V.! p
+                    in (k, k+d) -- (old k, new k)
+        dn = sum ks' - sum ks
+        n' = hc + dn
+        num = product $ factorial <$> (n':ks)
+        denom = product $ factorial <$> (n:ks')
+    in num % denom
+
+  where
+    minsert = M.insertWith $ M.unionWith (+)
+    Candidate (s0,s1) pp _ = c
 
 -------------------
 -- SERIALIZATION --
@@ -149,18 +193,18 @@ str2msps rs (p0:ps) = runST $ do
 
 -- | Decode a list of predictions
 decode :: Model -> BitVec -> [Int]
-decode mdl@(Model _ rs _ _) bv = msps2str rs rmsp msps
+decode mdl@(Model rs _ _ _ _) bv = msps2str rs rmsp msps
   where
-    rbase = Comb.multinomial $ snd <$> rms
-    bases = Comb.multinomial . fmap snd <$> mss
+    rbase = multinomial rms
+    bases = multinomial <$> mss
 
     vals = Var.decode (rbase:bases) bv
 
-    rms = filter ((>0) . snd) $ rootDistr mdl
-    mss = filter ((>0) . snd) <$> compositeDistrs mdl
+    rms = rootDistr mdl
+    mss = compositeDistrs mdl
 
-    rmsp = Comb.unrankMultisetPermutation rms $ head vals
-    msps = zipWith Comb.unrankMultisetPermutation mss $ tail vals
+    rmsp = Comb.unrankMultisetPermutation (snd rms) $ head vals
+    msps = zipWith Comb.unrankMultisetPermutation (snd <$> mss) $ tail vals
 
 -- | Walk the given transition tables back into a string of symbols
 msps2str :: Rules -> [Int] -> [[Maybe Int]] -> [Int]
