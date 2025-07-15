@@ -24,7 +24,7 @@ import qualified Codec.Arithmetic.Combinatorics as Comb
 import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
 
-import Diagram.Rules (Rules,AsFsts)
+import Diagram.Rules (Rules)
 import qualified Diagram.Rules as R
 import Diagram.Candidates (Candidate(..),PPType(..))
 import qualified Diagram.Candidates as C
@@ -51,38 +51,64 @@ import Diagram.Util
 -- | Count for each symbol.
 type Counts = U.Vector Int
 
-data Model = Model {
-  symbolRules :: !Rules,
-  headCount :: !Int, -- root ctx n
-  symbolCounts :: !(U.Vector Int), -- ns
-  symbolAsFsts :: !(B.Vector [Int]), -- ixs of the ks
-  symbolNonConstrs :: !(U.Vector Int) -- n - sum ks
-}
+data Model = Model
+  -- minimal parametrization --
+  !Rules -- ^ rs :: construction rules
+  !(U.Vector Int) -- ^ ks :: symbol construction counts
+
+  -- combinatorial bookkeeping --
+  !Int -- ^ n0 :: head count (total of the root coef)
+  !(U.Vector Int) -- ^ ns :: ctx state count (total of the coef)
+  !(U.Vector Int) -- ^ nc :: non-constructive ctxs (n - sum ks)
+  !(B.Vector [Int]) -- ^ af :: "as-first" (ixs of the ks)
+
+fromCounts :: Rules -> U.Vector Int -> Model
+fromCounts rs ks = Model rs ks n0 ns nc af
+  where
+    len = R.numSymbols rs
+    n0 = V.sum $ V.take 256 ks
+    af = R.asFsts rs
+
+    (ns,nc) = runST $ do
+      mnsv <- V.thaw ks -- start with k states (primary ctx)
+      mncv <- V.unsafeThaw $ V.replicate len 0
+
+      -- iterate in reverse, adding nc's to snd's state count (n)
+      forM_ [len-1,len-2..0] $ \s -> do
+        n <- MV.read mnsv s -- sum of primary and secondary ctx
+        let constrs = sum ((ks V.!) <$> (af V.! s)) -- sum ks
+            nonconstrs = n - constrs
+        MV.write mncv s nonconstrs -- write nc
+        forM_ (rs R.!? s) $ \(_,sB) ->
+          MV.modify mnsv (+nonconstrs) sB -- add secondaries to sB
+      nsv <- V.unsafeFreeze mnsv
+      ncv <- V.unsafeFreeze mncv
+      return (nsv,ncv)
 
 numSymbols :: Model -> Int
-numSymbols (Model rs _ _ _ _) = R.numSymbols rs
+numSymbols (Model rs _ _ _ _ _) = R.numSymbols rs
 
 rootDistr :: Model -> (Int, [(Int, Int)])
-rootDistr (Model _ hc ns _ _) = (hc, sks)
+rootDistr (Model _ ks n0 _ _ _) = (n0, sks)
   where sks = filter ((>0) . snd) $
-              zip [0..] $ V.toList $ V.take 256 ns
+              zip [0..] $ V.toList $ V.take 256 ks
 
 distr :: Model -> Int -> (Int, [(Maybe Int, Int)])
-distr (Model _ _ ns af nc) s = (n, sks)
+distr (Model _ ks _ ns nc af) s = (n, sks)
   where
     n = ns V.! s
     saf = af V.! s
-    ks = (ns V.!) <$> saf
     sks = filter ((>0) . snd) $
-          (Nothing, nc V.! s) : zip (Just <$> saf) ks
+          (Nothing, nc V.! s) :
+          zip (Just <$> saf) ((ks V.!) <$> saf)
 
 compositeDistrs :: Model -> [(Int, [(Maybe Int,Int)])]
 compositeDistrs mdl = distr mdl <$>
                       [256..numSymbols mdl - 1]
 
 multinomial :: (Int,[(s,Int)]) -> Integer
-multinomial (n,sks) = factorial n
-                      `div` product (factorial . snd <$> sks)
+multinomial (n,ks) = factorial n
+                     `div` product (factorial . snd <$> ks)
 
 variety :: Model -> Integer
 variety mdl = product $ multinomial (rootDistr mdl) :
@@ -92,62 +118,75 @@ variety mdl = product $ multinomial (rootDistr mdl) :
 -- supplanted by the introduction of the candidate and +n for the
 -- candidate
 deltaCounts :: Rules -> Candidate -> IntMap Int
-deltaCounts rs c@(Candidate (_,s1) pp n) = case C.ppType rs c of
-  Atomic -> L.foldl' (flip dockN) im0 $
+deltaCounts rs c@(Candidate (_,s1) pp m) = case C.ppType rs c of
+  Atomic -> L.foldl' (flip dockM) im0 $
             takeUntil (== pp) $ R.prefixes rs s1
 
-  S1IsSnd -> dockN pp im0
+  S1IsSnd -> dockM pp im0
 
-  _else  -> dockN pp $
-            L.foldl' (flip dockN) im0 $
+  _else  -> dockM pp $
+            L.foldl' (flip dockM) im0 $
             takeUntil (== snd (rs R.! pp)) $ R.prefixes rs s1
   where
     s01 = R.numSymbols rs
-    im0 = IM.singleton s01 n -- n times s01 regardless of shape
-    dockN s = IM.insertWith (+) s (-n)
+    im0 = IM.singleton s01 m -- n times s01 regardless of shape
+    dockM s = IM.insertWith (+) s (-m)
 
 insert :: Model -> Candidate -> (Int, Model)
-insert (Model rs hc ns af nc) c = (s01, Model rs' hc' ns' af' nc')
+insert (Model rs ks n0 ns nc af) c = ( s01
+                                     , Model rs' ks' n0' ns' nc' af' )
   where
-    Candidate (s0,s1) _ _ = c
+    Candidate (s0,s1) _ k = c
     (s01, rs') = R.push (s0,s1) rs
+    af' = af V.// [(s0, s01:(af V.! s0))] -- cons s01 at s0
+
     deltas = IM.toAscList $ deltaCounts rs c
-    (hc', ns', nc') = runST $ do
-      hcref <- newSTRef hc -- sum $ take 256 $ ns
-      mnsv <- V.unsafeThaw $ V.snoc ns 0 -- n
+    (ks', n0', ns', nc') = runST $ do
+      mksv <- V.unsafeThaw $ V.snoc ks k
+      n0ref <- newSTRef n0
+      mnsv <- V.unsafeThaw $ V.snoc ns k
       mncv <- V.unsafeThaw $ V.snoc nc 0 -- n - sum ks
+
       forM_ deltas $ \(s,delta) -> do
-        MV.modify mnsv (+delta) s
+        MV.modify mksv (+delta) s
+
+        -- FIXME --
         MV.modify mncv (+delta) s
+
         case rs R.!? s of
-          Nothing -> modifySTRef hcref (+delta)
+          Nothing -> modifySTRef n0ref (+delta)
           Just (sA,_) -> MV.modify mncv (+(-delta)) sA
+
+      ksv <- V.unsafeFreeze mksv
+      n0res <- readSTRef n0ref
       nsv <- V.unsafeFreeze mnsv
       ncv <- V.unsafeFreeze mncv
-      (, nsv, ncv) <$> readSTRef hcref
-    af' = af V.// [(s0, s01:(af V.! s0))] -- cons s01 at s0
+      return (ksv, n0res, nsv, ncv)
+
 
 -- | Equivalent to deltaCodeLen in variety space, the factor to multiply
 -- the old variety to get the new variety after adding this candidate
 ratioVariety :: Model -> Candidate -> Ratio Integer
-ratioVariety (Model rs hc ns af nc) c =
+ratioVariety (Model rs ks n0 ns nc af) c =
   let m = L.foldl' (flip id) M.empty $
           (<$> IM.toList (deltaCounts rs c)) $ \(s, delta) ->
         minsert (Just s) (M.singleton Nothing delta)
         . minsert (fst <$> (rs R.!? s)) (M.singleton (Just s) delta)
 
+  ----------------- FIXME ----------------------
+
   in product $ (<$> M.toList m) $ \(ctx, ds) ->
-    let n = maybe hc (ns V.!) ctx -- hc is the n for the Nothing ctx
-        (ks,ks') = unzip $ (<$> M.toList ds) $ \(mp, d) -> case mp of
+    let n = maybe n0 (ks V.!) ctx -- n0 is the n for the Nothing ctx
+        (as,bs) = unzip $ (<$> M.toList ds) $ \(mp, d) -> case mp of
           Nothing -> let
             in undefined
 
-          Just p -> let k = ns V.! p
+          Just p -> let k = ks V.! p
                     in (k, k+d) -- (old k, new k)
-        dn = sum ks' - sum ks
-        n' = hc + dn
-        num = product $ factorial <$> (n':ks)
-        denom = product $ factorial <$> (n:ks')
+        dn = sum bs - sum as
+        n' = n0 + dn
+        num = product $ factorial <$> (n':as)
+        denom = product $ factorial <$> (n:bs)
     in num % denom
 
   where
@@ -193,7 +232,7 @@ str2msps rs (p0:ps) = runST $ do
 
 -- | Decode a list of predictions
 decode :: Model -> BitVec -> [Int]
-decode mdl@(Model rs _ _ _ _) bv = msps2str rs rmsp msps
+decode mdl@(Model rs _ _ _ _ _) bv = msps2str rs rmsp msps
   where
     rbase = multinomial rms
     bases = multinomial <$> mss

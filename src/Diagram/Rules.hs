@@ -182,11 +182,7 @@ extLen = length .:. consExtension
 
 -- | For every symbol, the list of composite symbols that have that
 -- symbol as first/left part.
-type AsFsts = B.Vector [Int]
-
--- | For every symbol, the list of composite symbols that have that
--- symbol as first/left part.
-asFsts :: Rules -> AsFsts
+asFsts :: Rules -> B.Vector [Int]
 asFsts rs = V.create $ do
   mv <- MV.replicate (numSymbols rs) []
   forM_ [256..numSymbols rs - 1] $ \s ->
