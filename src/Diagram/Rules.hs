@@ -6,7 +6,6 @@ module Diagram.Rules (module Diagram.Rules) where
 import Prelude
 
 import Control.Exception (assert)
-import Control.Monad.ST
 import Control.Monad
 
 import Data.Word (Word8)
@@ -18,6 +17,13 @@ import qualified Data.Vector as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
+
+import Math.Combinatorics.Exact.Factorial (factorial)
+
+import qualified Codec.Elias.Natural as Elias
+import qualified Codec.Arithmetic.Variety as Var
+import Codec.Arithmetic.Variety.BitVec (BitVec)
+import qualified Codec.Arithmetic.Variety.BitVec as BV
 
 import Diagram.Util
 
@@ -176,15 +182,64 @@ consExtension rs s pp = pp : tail consIl
 extLen :: Rules -> Int -> Int -> Int
 extLen = length .:. consExtension
 
--------------
--- AS FSTS --
--------------
+--------------
+-- INDEXING --
+--------------
+
+-- | Generic for `asFsts` and `asSnds`
+asGen :: ((Int,Int) -> Int) -> Rules -> B.Vector [Int]
+asGen f rs = V.create $ do
+  mv <- MV.replicate (numSymbols rs) []
+  forM_ [256..numSymbols rs - 1] $ \s ->
+    MV.modify mv (s:) $ f (rs ! s)
+  return mv
+{-# INLINE asGen #-}
 
 -- | For every symbol, the list of composite symbols that have that
 -- symbol as first/left part.
 asFsts :: Rules -> B.Vector [Int]
-asFsts rs = V.create $ do
-  mv <- MV.replicate (numSymbols rs) []
-  forM_ [256..numSymbols rs - 1] $ \s ->
-    MV.modify mv (s:) $ fst (rs ! s)
-  return mv
+asFsts = asGen fst
+
+-- | For every symbol, the list of composite symbols that have that
+-- symbol as second/right part.
+asSnds :: Rules -> B.Vector [Int]
+asSnds = asGen snd
+
+-------------------
+-- SERIALIZATION --
+-------------------
+
+encode :: Rules -> BitVec
+encode rs = lenCode <> rulesCode -- cat of rulesLen + rules
+  where
+    lenCode = Elias.encodeDelta $ fromIntegral $ V.length rs
+    rulesCode = Var.encode $
+                foldr (\(a,b) acc -> a : b : acc) [] $
+                zipWith (\(s0,s1) base -> ( (fromIntegral s0, base)
+                                          , (fromIntegral s1, base) ))
+                (V.toList rs)
+                [256::Integer ..]
+
+-- TODO: this would probably be faster if we computed in real valued
+-- information (bits) instead of getting the exact bit length
+codeLen :: Rules -> Int
+codeLen rs = lenCodeLen + rulesCodeLen
+  where
+    len = V.length rs
+    lenCode = Elias.encodeDelta $ fromIntegral len
+    lenCodeLen = BV.length lenCode
+    rulesCodeLen = BV.bitLen $ product $
+                   (\a -> a*a) <$> take len [256..]
+
+decode :: BitVec -> Maybe (Rules, BitVec)
+decode bv = do
+  (len,bv') <- Elias.decodeDelta bv
+  let bases = foldr (\a acc -> a:a:acc) [] $ -- dupe each
+              take (fromIntegral len) [256..]
+  (vals,bv'') <- Var.decode bases bv'
+  Just ( V.fromList $ go $ fromIntegral <$> vals
+       , bv'' )
+  where
+    go [] = []
+    go (a:b:rest) = (a,b):go rest
+    go (_:_) = error "impossible"
