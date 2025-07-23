@@ -13,10 +13,13 @@ import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
 
+import Numeric.SpecFunctions (logFactorial)
+
 import qualified Codec.Elias as Elias
 import qualified Codec.Arithmetic.Combinatorics as Comb
 import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
+import qualified Codec.Arithmetic.Variety.BitVec as BV
 
 import Diagram.Rules (Rules)
 import qualified Diagram.Rules as R
@@ -69,3 +72,66 @@ decode bv = do
   let model = Model rs n (V.fromList ks)
   (ss, bv'''') <- Comb.decodeMultisetPermutation (zip [0..] ks) bv'''
   Just (model, ss, bv'''')
+
+-- | Code length in bits of the serialization of the model + a sampled
+-- symbol string
+codeLen :: Model -> Int
+codeLen (Model rs n ks) = rsCodeLen + nCodeLen
+                          + fromIntegral ksCodeLen
+                          + fromIntegral ssCodeLen
+  where
+    rsCodeLen = R.codeLen rs
+    nCodeLen = BV.length $ Elias.encodeDelta $ fromIntegral n
+    ksCodeLen = Var.codeLen1 $ Comb.countDistributions n $ R.numSymbols rs
+    ssCodeLen = Var.codeLen1 $ Comb.multinomial $ V.toList ks
+
+-- | logBase 2 e, for [nats] * log2e = [bits]
+log2e :: Double
+log2e = 1.44269504088896340735992468100189214
+
+eliasInfo :: Int -> Double
+eliasInfo = fromIntegral
+            . BV.length
+            . Elias.encodeDelta
+            . fromIntegral
+
+-- | Compute the information, in bits, of a distribution of `n` elements
+-- into `k` bins through the stars-and-bars angle
+distrInfo :: Int -> Int -> Double
+distrInfo _ 0 = 0.0
+distrInfo n k = log2e * ( logFactorial (stars + bars)
+                          - logFactorial stars
+                          - logFactorial bars )
+  where stars = n
+        bars = k - 1
+
+-- | Information in bits of the given model + a sampled symbol string
+information :: Model -> Double
+information (Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
+  where
+    rsInfo = R.information rs
+    nInfo = eliasInfo n
+    ksInfo = distrInfo n (V.length ks)
+    ssInfo = log2e * ( logFactorial n
+                       - V.sum (logFactorial `V.map` ks))
+
+-- | Compute the change in information of the model + sampled symbol
+-- string given a new rule
+infoDelta :: Model -> (Int,Int) -> Int -> Double
+infoDelta (Model rs n ks) (s0,s1) n01 =
+  rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+  where
+    rsInfoDelta = R.fwdInfoDelta rs -- constant
+    n' = n - n01
+    nInfoDelta = eliasInfo n' - eliasInfo n
+    ksInfoDelta = distrInfo n' (V.length ks + 1)
+                  - distrInfo n (V.length ks)
+
+    ssInfoDelta = log2e * ( logFactorial n' - logFactorial n
+                            - logFactorial n0' + logFactorial n0
+                            - logFactorial n1' + logFactorial n1
+                            - logFactorial n01 )
+    n0 = ks V.! s0
+    n0' = n0 - n01
+    n1 = ks V.! s1
+    n1' = n1 - n01
