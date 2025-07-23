@@ -18,8 +18,6 @@ import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
 
-import Math.Combinatorics.Exact.Factorial (factorial)
-
 import qualified Codec.Elias.Natural as Elias
 import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
@@ -110,77 +108,12 @@ suffixes rs = go
                        in s : go s1
 
 -- | Resolve the symbol back into a string of chars
-toString :: Rules -> Int -> String
+toString :: Rules -> [Int] -> String
 toString = UTF8.toString
            . BS.pack
            . fmap fromIntegral
-           .: extension
-
-resolveBwd' :: Rules -> [Int] -> [Int]
-resolveBwd' _ [] = []
-resolveBwd' rs (s:_) = case invLookup rs s of
-  Nothing -> [s]
-  Just (_, sB) -> [sB, s]
-
-resolveFwd' :: Rules -> [Int] -> [Int]
-resolveFwd' rs ss = case fst $ splitHeadFwd rs ss of
-  [] -> []
-  (pp:rest) -> maybe pp snd (invLookup rs pp) : rest
-
--- | Take symbols from a list as long as they construct with the
--- accumulated head, starting with the target of the first symbol
-splitHeadFwd :: Rules -> [Int] -> ([Int],[Int])
-splitHeadFwd _ [] = ([],[])
-splitHeadFwd rs (pp:ss0) = let (hd0,tl0) = go s0 ss0
-                           in (pp:hd0,tl0)
-  where
-    s0 = maybe pp snd $ invLookup rs pp
-    go _ [] = ([],[])
-    go sA (s:ss) | Just (sA',_) <- invLookup rs s
-                 , sA == sA' = let (hd,tl) = go s ss
-                               in (s:hd, tl)
-                 | otherwise = ([], s:ss)
-
--- | Take the first symbol and all its following prefixes (large to
--- small) from a reversed list of predictions, down to the pp
-splitHeadBwd :: Rules -> [Int] -> ([Int],[Int])
-splitHeadBwd _ [] = ([],[])
-splitHeadBwd rs (s0:ss0) = let (hd0,tl0) = go s0 ss0
-                           in (s0:hd0, tl0)
-  where go _ [] = ([],[])
-        go s (sA':ss) = case invLookup rs s of
-          Nothing -> ([], sA':ss) -- atomic, s is pp
-          Just (sA,_)
-            | sA' == sA -> let (hd,tl) = go sA ss
-                           in (s:hd, tl)
-            | otherwise ->
-                assert ((snd <$> invLookup rs sA') == Just s)
-                ([sA'], ss) -- sA' is pp
-
--- | Return the constructive interval between two symbols, assuming the
--- first is a prefix of the second. The result is guaranteed to start
--- with lo and end with hi, like a range.
-consInterval :: Rules -> Int -> Int -> [Int]
-consInterval rs lo hi = go hi [hi]
-  where
-    go s acc | s == lo = acc
-             | otherwise = case invLookup rs s of
-                 Nothing -> error $ "not an interval: " ++ show (lo,hi)
-                 Just (sA,_) -> go sA $ sA:acc
-
--- | Given a symbol and its predecessor prediction (pp), return the
--- chunked extension of the symbol in a string with the given rule
--- set. This is equivalent to the constructive interval from the target
--- part of the pp and the symbol (inclusive), with pp in the head
--- instead.
-consExtension :: Rules -> Int -> Int -> [Int]
-consExtension rs s pp = pp : tail consIl
-  where
-    ppTgt = maybe pp snd $ invLookup rs pp
-    consIl = consInterval rs ppTgt s
-
-extLen :: Rules -> Int -> Int -> Int
-extLen = length .:. consExtension
+           .: concatMap
+           . extension
 
 --------------
 -- INDEXING --
@@ -228,7 +161,7 @@ codeLen rs = lenCodeLen + rulesCodeLen
     len = V.length rs
     lenCode = Elias.encodeDelta $ fromIntegral len
     lenCodeLen = BV.length lenCode
-    rulesCodeLen = BV.bitLen $ product $
+    rulesCodeLen = Var.codeLen1 $ product $
                    (\a -> a*a) <$> take len [256..]
 
 decode :: BitVec -> Maybe (Rules, BitVec)
