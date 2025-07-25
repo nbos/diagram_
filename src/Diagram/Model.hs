@@ -1,4 +1,4 @@
-module Diagram.Variety (module Diagram.Variety) where
+module Diagram.Model (module Diagram.Model) where
 
 import Control.Monad.ST
 import Control.Monad
