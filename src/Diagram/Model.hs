@@ -51,6 +51,16 @@ fromSymbols rs ss = Model rs n ks
     ks = V.replicate (R.numSymbols rs) 0
          V.// IM.toList im -- write
 
+push :: Model -> (Int,Int) -> Int -> (Int, Model)
+push (Model rs n ks) (s0,s1) n01 = (s01, Model rs' n' ks')
+  where
+    (s01,rs') = R.push (s0,s1) rs
+    n' = n - n01
+    ks' = runST $ do
+      mutks <- V.unsafeThaw $ V.snoc ks n01
+      forM_ [s0,s1] $ MV.modify mutks (+(-n01))
+      V.unsafeFreeze mutks
+
 -- | Serialize a rule set and symbol string
 encode :: Rules -> [Int] -> BitVec
 encode rs ss = rsCode <> nCode <> ksCode <> ssCode

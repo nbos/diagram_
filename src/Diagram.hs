@@ -1,9 +1,15 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, OverloadedStrings #-}
 module Diagram where
 
 import System.Environment (getArgs)
 import System.Exit
+import System.ProgressBar
 
+import Control.Monad
+import Control.Exception (evaluate)
+
+import Data.Ord
+import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.ByteString as BS
@@ -12,6 +18,7 @@ import Streaming
 import qualified Streaming.Prelude as S
 
 import Diagram.Model
+import qualified Diagram.Rules as R
 
 main :: IO ()
 main = do
@@ -23,14 +30,64 @@ main = do
           mdl = fromAtoms as
           ss = fromEnum <$> as
           m = listCandidates ss
-          (mdl',ss') = go mdl m ss
-      exitSuccess
+      go mdl ss m
 
     _else -> do
       putStrLn "Usage: program <filename>"
       exitFailure
   where
-    go mdl ss m = undefined
+    go mdl@(Model rs _ _) ss m = do
+      pb0 <- newPB (M.size m) "Computing losses"
+      cdts <- forM (M.toList m) $ \(s0s1,n01) -> do
+                loss <- evaluate $ infoDelta mdl s0s1 n01
+                incProgress pb0 1
+                return (loss, s0s1, n01)
+      finishPB pb0
+
+      putStrLn "Sorting candidates..."
+      (loss,(s0,s1),n01) <- case L.sortBy (comparing Down) cdts of
+        [] -> error "no candidates"
+        (c:cdts') -> do
+          putStrLn "Top candidates:"
+          forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
+          putStrLn ""
+          return c
+
+      when (loss > 0) ( putStrLn "Reached minimum. Terminating."
+                        >> exitSuccess )
+
+      let (s01, mdl') = push mdl (s0,s1) n01
+      putStrLn "New rule:"
+      putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
+
+      putStrLn "Rewriting..." -- TODO: progress bar
+      let (ss', deltas) = rewrite (s0,s1) n01 ss
+          m' = M.unionWith (+) m deltas
+
+      go mdl' ss' m' -- continue
+
+    showCdt rs (loss,(s0,s1),n01) =
+      show loss ++ ": "
+      ++ showJoint rs s0 s1
+      ++ " (" ++ show n01 ++ ")"
+
+    showJoint rs s0 s1 = "\"" ++ R.toString rs [s0]
+      ++ "\" + \"" ++ R.toString rs [s0]
+      ++ "\" ==> \"" ++ R.toString rs [s0,s1] ++ "\""
+
+    newPB n message = newProgressBar style 10 (Progress 0 n ())
+      where
+        style = defStyle{
+          stylePrefix = msg (message <> " ") <> exact,
+          stylePostfix = percentage <> msg "% "
+                         <> remainingTime renderDuration ""
+                         <> msg " " <> elapsedTime renderDuration,
+          styleDone = '#',
+          styleCurrent = '#',
+          styleTodo = '-'}
+
+    finishPB = flip updateProgress $ \(Progress dn td s) ->
+                 Progress (dn+td) 0 s
 
 -- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
 -- a delta of the counts of candidates in the string after the
