@@ -56,14 +56,17 @@ main = do
       when (loss > 0) ( putStrLn "Reached minimum. Terminating."
                         >> exitSuccess )
 
-      let (s01, mdl') = push mdl (s0,s1) n01
+      let (s01, mdl'@(Model _ n' _)) = push mdl (s0,s1) n01
       putStrLn "New rule:"
       putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
 
-      putStrLn "Rewriting..." -- TODO: progress bar
-      let (ss', deltas) = rewrite (s0,s1) n01 ss
-          m' = M.unionWith (+) m deltas
+      pb1 <- newPB n' "Rewriting string"
+      (ss', deltas) <- fmap S.lazily $ S.toList $
+                       S.mapM (\s -> incProgress pb1 1 >> return s) $
+                       rewrite (s0,s1) n01 ss
+      finishPB pb1
 
+      let m' = M.unionWith (+) m deltas
       go mdl' ss' m' -- continue
 
     showCdt rs (loss,(s0,s1),n01) =
@@ -92,8 +95,8 @@ main = do
 -- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
 -- a delta of the counts of candidates in the string after the
 -- application of the rule relative to before.
-rewrite :: (Int,Int) -> Int -> [Int] -> ([Int], Map (Int,Int) Int)
-rewrite (s0,s1) s01 str = S.lazily $ runIdentity $ S.toList $ case str of
+rewrite :: Monad m => (Int, Int) -> Int -> [Int] -> Stream (Of Int) m (Map (Int, Int) Int)
+rewrite (s0,s1) s01 str = case str of
   [] -> return M.empty
   [s] -> S.yield s >> return M.empty
   s:s':ss | s == s0 && s' == s1 -> do
