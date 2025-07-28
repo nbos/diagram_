@@ -113,7 +113,6 @@ suffixes rs = go
 toString :: Rules -> [Int] -> String
 toString = UTF8.toString
            . BS.pack
-           . fmap fromIntegral
            .: concatMap
            . extension
 
@@ -209,4 +208,4 @@ fwdInfoDelta rs = lenDeltaInfo + rulesDeltaInfo
   where
     len = V.length rs
     lenDeltaInfo = eliasInfo (len + 1) - eliasInfo len
-    rulesDeltaInfo = log2e * 2 * log (fromIntegral (256 + len + 1))
+    rulesDeltaInfo = log2e * 2 * log (fromIntegral (256 + len))

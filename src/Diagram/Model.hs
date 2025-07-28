@@ -1,5 +1,6 @@
 module Diagram.Model (module Diagram.Model) where
 
+import Debug.Trace
 import Control.Monad.ST
 import Control.Monad
 
@@ -28,7 +29,7 @@ data Model = Model {
   modelRules :: !Rules,
   modelTotalCount :: !Int,
   modelCounts :: !(U.Vector Int)
-}
+} deriving Show
 
 -- | Initial construction from string of atoms
 fromAtoms :: [Word8] -> Model
@@ -129,19 +130,29 @@ information (Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
 -- string given a new rule
 infoDelta :: Model -> (Int,Int) -> Int -> Double
 infoDelta (Model rs n ks) (s0,s1) n01 =
+  traceShow (R.toString rs [s0,s1]) $
+  traceShow [rsInfoDelta,nInfoDelta,ksInfoDelta,ssInfoDelta] $
   rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
   where
-    rsInfoDelta = R.fwdInfoDelta rs -- constant
+    -- rules info delta (constant)
+    rsInfoDelta = R.fwdInfoDelta rs
+
+    -- n elias encoding
     n' = n - n01
     nInfoDelta = eliasInfo n' - eliasInfo n
-    ksInfoDelta = distrInfo n' (V.length ks + 1)
-                  - distrInfo n (V.length ks)
 
-    ssInfoDelta = log2e * ( logFactorial n' - logFactorial n
-                            - logFactorial n0' + logFactorial n0
-                            - logFactorial n1' + logFactorial n1
-                            - logFactorial n01 )
+    -- ks a distribution of n elements
+    ksInfoDelta = distrInfo n' (V.length ks + 1) -- new
+                  - distrInfo n (V.length ks) -- old
+
+    -- ss a multiset permutation of counts ks
+    ssInfoDelta
+      | s0 == s1 = log2e * ( logFactorial n' - logFactorial n
+                             - logFactorial (n0 - 2*n01) + logFactorial n0
+                             - logFactorial n01 )
+      | otherwise = log2e * ( logFactorial n' - logFactorial n
+                             - logFactorial (n0 - n01) + logFactorial n0
+                             - logFactorial (n1 - n01) + logFactorial n1
+                             - logFactorial n01 )
     n0 = ks V.! s0
-    n0' = n0 - n01
     n1 = ks V.! s1
-    n1' = n1 - n01

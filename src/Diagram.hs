@@ -3,14 +3,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram where
 
+import Debug.Trace
 import System.Environment (getArgs)
 import System.Exit
 import System.ProgressBar
 
 import Control.Monad
 import Control.Exception (evaluate)
-
-import Data.Ord
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -21,6 +20,7 @@ import qualified Streaming.Prelude as S
 
 import Diagram.Model
 import qualified Diagram.Rules as R
+import Diagram.Util
 
 main :: IO ()
 main = do
@@ -33,7 +33,7 @@ main = do
           mdl = fromAtoms as
           ss = fromEnum <$> as
       pb0 <- newPB len "Initializing joint counts"
-      (m,()) <- countJoints $
+      (m,()) <- countJointsM $
                 S.mapM (\s -> incPB pb0 >> return s) $
                 S.each ss
       go mdl ss m
@@ -50,7 +50,7 @@ main = do
                 return (loss, s0s1, n01)
 
       putStrLn "Sorting candidates..."
-      (loss,(s0,s1),n01) <- case L.sortBy (comparing Down) cdts of
+      (loss,(s0,s1),n01) <- case L.sort cdts of
         [] -> error "no candidates"
         (c:cdts') -> do
           putStrLn "Top candidates:"
@@ -62,16 +62,22 @@ main = do
                         >> exitSuccess )
 
       let (s01, mdl'@(Model _ n' _)) = push mdl (s0,s1) n01
-      putStrLn "New rule:"
+
+      traceShow mdl' $ putStrLn "New rule:"
       putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
 
       pb2 <- newPB n' "Rewriting string"
       (ss', deltas) <- fmap S.lazily $ S.toList $
                        S.mapM (\s -> incPB pb2 >> return s) $
-                       rewrite (s0,s1) n01 ss
+                       rewrite (s0,s1) s01 ss
 
-      let m' = M.unionWith (+) m deltas
-      go mdl' ss' m' -- continue
+      let m' = M.differenceWith (nothingIf (== 0) .: (+)) m deltas
+
+          -- TODO : remove DEBUG --
+          deltam = M.differenceWith (nothingIf (== 0) .: (+)) m' $
+                   (0-) <$> countJoints ss'
+      if not $ M.null deltam then error $ "counts discrepancy: " ++ show deltam
+      else go mdl' ss' m' -- continue
 
     showCdt rs (loss,(s0,s1),n01) =
       show loss ++ ": "
@@ -114,6 +120,7 @@ rewrite (s0,s1) s01 str = case str of
     inc s0s1 = M.insertWith (+) s0s1 1
     dec s0s1 = M.insertWith (+) s0s1 (-1)
 
+    -- FIXME: over-decs by 1 on pattern [s,s,s,s]
     go _ []  !m = return m
     go _ [s] !m = S.yield s >> return m
     go prev (s:s':ss) !m
@@ -135,8 +142,11 @@ rewrite (s0,s1) s01 str = case str of
     subst (s:s':ss) | s == s0 && s' == s1 = s01:subst ss
                     | otherwise = s:subst (s':ss)
 
-countJoints :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
-countJoints = go M.empty
+countJoints :: [Int] -> Map (Int,Int) Int
+countJoints = fst . runIdentity . countJointsM . S.each
+
+countJointsM :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
+countJointsM = go M.empty
   where
     inc s0s1 = M.insertWith (+) s0s1 1
     go !m ss = (S.next ss >>=) $ \case
