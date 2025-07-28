@@ -1,4 +1,6 @@
-{-# LANGUAGE BangPatterns, OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Diagram where
 
 import System.Environment (getArgs)
@@ -26,23 +28,26 @@ main = do
   case args of
     [filename] -> do
       bytestring <- BS.readFile filename
-      let as = BS.unpack bytestring
+      let len = BS.length bytestring
+          as = BS.unpack bytestring
           mdl = fromAtoms as
           ss = fromEnum <$> as
-          m = listCandidates ss
+      pb0 <- newPB len "Initializing joint counts"
+      (m,()) <- countJoints $
+                S.mapM (\s -> incPB pb0 >> return s) $
+                S.each ss
       go mdl ss m
 
     _else -> do
       putStrLn "Usage: program <filename>"
       exitFailure
   where
-    go mdl@(Model rs _ _) ss m = do
-      pb0 <- newPB (M.size m) "Computing losses"
+    go mdl@(Model rs _ _) ss !m = do
+      pb1 <- newPB (M.size m) "Computing losses"
       cdts <- forM (M.toList m) $ \(s0s1,n01) -> do
                 loss <- evaluate $ infoDelta mdl s0s1 n01
-                incProgress pb0 1
+                incPB pb1
                 return (loss, s0s1, n01)
-      finishPB pb0
 
       putStrLn "Sorting candidates..."
       (loss,(s0,s1),n01) <- case L.sortBy (comparing Down) cdts of
@@ -60,11 +65,10 @@ main = do
       putStrLn "New rule:"
       putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
 
-      pb1 <- newPB n' "Rewriting string"
+      pb2 <- newPB n' "Rewriting string"
       (ss', deltas) <- fmap S.lazily $ S.toList $
-                       S.mapM (\s -> incProgress pb1 1 >> return s) $
+                       S.mapM (\s -> incPB pb2 >> return s) $
                        rewrite (s0,s1) n01 ss
-      finishPB pb1
 
       let m' = M.unionWith (+) m deltas
       go mdl' ss' m' -- continue
@@ -75,27 +79,27 @@ main = do
       ++ " (" ++ show n01 ++ ")"
 
     showJoint rs s0 s1 = "\"" ++ R.toString rs [s0]
-      ++ "\" + \"" ++ R.toString rs [s0]
+      ++ "\" + \"" ++ R.toString rs [s1]
       ++ "\" ==> \"" ++ R.toString rs [s0,s1] ++ "\""
 
     newPB n message = newProgressBar style 10 (Progress 0 n ())
       where
         style = defStyle{
           stylePrefix = msg (message <> " ") <> exact,
-          stylePostfix = percentage <> msg "% "
-                         <> remainingTime renderDuration ""
-                         <> msg " " <> elapsedTime renderDuration,
+          stylePostfix = percentage <> msg "% ETA: "
+                         <> remainingTime renderDuration "00"
+                         <> msg " DUR: " <> elapsedTime renderDuration,
           styleDone = '#',
           styleCurrent = '#',
-          styleTodo = '-'}
+          styleTodo = '-' }
 
-    finishPB = flip updateProgress $ \(Progress dn td s) ->
-                 Progress (dn+td) 0 s
+    incPB pb = incProgress pb 1
 
 -- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
 -- a delta of the counts of candidates in the string after the
 -- application of the rule relative to before.
-rewrite :: Monad m => (Int, Int) -> Int -> [Int] -> Stream (Of Int) m (Map (Int, Int) Int)
+rewrite :: Monad m => (Int, Int) -> Int -> [Int] ->
+           Stream (Of Int) m (Map (Int, Int) Int)
 rewrite (s0,s1) s01 str = case str of
   [] -> return M.empty
   [s] -> S.yield s >> return M.empty
@@ -131,14 +135,16 @@ rewrite (s0,s1) s01 str = case str of
     subst (s:s':ss) | s == s0 && s' == s1 = s01:subst ss
                     | otherwise = s:subst (s':ss)
 
-listCandidates :: [Int] -> Map (Int,Int) Int
-listCandidates = go M.empty
+countJoints :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
+countJoints = go M.empty
   where
     inc s0s1 = M.insertWith (+) s0s1 1
-    go !m [] = m
-    go !m [_] = m
-    go !m [s0,s1] = inc (s0,s1) m
-    go !m (s0:s1:s2:ss) =
-      go (inc (s0,s1) m) $ if s0 == s1 && s1 == s2
-                           then s2:ss
-                           else s1:s2:ss
+    go !m ss = (S.next ss >>=) $ \case
+      Left r -> return (m,r) -- end
+      Right (s0,ss') -> (S.next ss' >>=) $ \case
+        Left r -> return (m,r) -- singleton, end
+        Right (s1,ss'') -> (S.next ss'' >>=) $ \case
+          Left r -> return (inc (s0,s1) m, r) -- last joint
+          Right (s2,ss''') -> go (inc (s0,s1) m) $ ms1 >> S.yield s2 >> ss'''
+            where ms1 | s0 == s1 && s1 == s2 = return ()
+                      | otherwise = S.yield s1
