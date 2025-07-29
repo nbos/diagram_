@@ -1,6 +1,5 @@
 module Diagram.Model (module Diagram.Model) where
 
-import Debug.Trace
 import Control.Monad.ST
 import Control.Monad
 
@@ -130,8 +129,8 @@ information (Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
 -- string given a new rule
 infoDelta :: Model -> (Int,Int) -> Int -> Double
 infoDelta (Model rs n ks) (s0,s1) n01 =
-  traceShow (R.toString rs [s0,s1]) $
-  traceShow [rsInfoDelta,nInfoDelta,ksInfoDelta,ssInfoDelta] $
+  -- traceShow (R.toString rs [s0,s1]) $
+  -- traceShow [rsInfoDelta,nInfoDelta,ksInfoDelta,ssInfoDelta] $
   rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
   where
     -- rules info delta (constant)

@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Diagram where
+module Diagram (module Diagram) where
 
 import Debug.Trace
 import System.Environment (getArgs)
@@ -69,7 +69,7 @@ main = do
       pb2 <- newPB n' "Rewriting string"
       (ss', deltas) <- fmap S.lazily $ S.toList $
                        S.mapM (\s -> incPB pb2 >> return s) $
-                       rewrite (s0,s1) s01 ss
+                       rewriteM (s0,s1) s01 ss
 
       let m' = M.differenceWith (nothingIf (== 0) .: (+)) m deltas
 
@@ -101,12 +101,15 @@ main = do
 
     incPB pb = incProgress pb 1
 
+rewrite :: (Int, Int) -> Int -> [Int] -> ([Int], Map (Int, Int) Int)
+rewrite = S.lazily . runIdentity . S.toList .:. rewriteM
+
 -- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
 -- a delta of the counts of candidates in the string after the
 -- application of the rule relative to before.
-rewrite :: Monad m => (Int, Int) -> Int -> [Int] ->
-           Stream (Of Int) m (Map (Int, Int) Int)
-rewrite (s0,s1) s01 str = case str of
+rewriteM :: Monad m => (Int, Int) -> Int -> [Int] ->
+            Stream (Of Int) m (Map (Int, Int) Int)
+rewriteM (s0,s1) s01 str = case str of
   [] -> return M.empty
   [s] -> S.yield s >> return M.empty
   s:s':ss | s == s0 && s' == s1 -> do
@@ -120,21 +123,21 @@ rewrite (s0,s1) s01 str = case str of
     inc s0s1 = M.insertWith (+) s0s1 1
     dec s0s1 = M.insertWith (+) s0s1 (-1)
 
-    -- FIXME: over-decs by 1 on pattern [s,s,s,s]
     go _ []  !m = return m
     go _ [s] !m = S.yield s >> return m
     go prev (s:s':ss) !m
-      | s == s0 && s' == s1 = do
-          S.yield s01 -- construct
-          let m' = dec (prev,s0) $ dec (s0,s1) $ inc (prev,s01) m
-          go s01 ss $ case subst ss of
-            [] -> m'
-            (s'':_)
-              | s'' == s01 -> dec (s1,s0) m' -- (s01,s01) not ours
-              | otherwise -> dec (s1,s'') $
-                             inc (s01,s'') m'
-
+      | s == s0 && s' == s1 = S.yield s01 >> go s01 ss (f m)
       | otherwise = S.yield s >> go s (s':ss) m
+      where
+        f = dec (s0,s1) . deltaPrev . deltaNext
+        deltaPrev | prev == s01 = inc (s01,s01)
+                  | otherwise = dec (prev,s0)
+                                . inc (prev,s01)
+        deltaNext = case subst ss of
+          (s'':_) | s'' /= s01 -> dec (s1,s'') -- rm with next
+                                  . inc (s01,s'')
+          -- if s'' == s01 then [s01,s01] will be counted in deltaPrev
+          _else -> id
 
     -- go, without the count deltas
     subst [] = []
