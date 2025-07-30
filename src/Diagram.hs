@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase, TupleSections #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
@@ -67,26 +67,37 @@ main = do
       putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
 
       pb2 <- newPB n' "Rewriting string"
-      (ss', deltas) <- fmap S.lazily $ S.toList $
+      (ss', (am,rm)) <- fmap S.lazily $ S.toList $
                        S.mapM (\s -> incPB pb2 >> return s) $
                        rewriteM (s0,s1) s01 ss
 
-      let m' = M.differenceWith (nothingIf (== 0) .: (+)) m deltas
+      let m' = M.unionWith (+) am $
+               M.differenceWith (nothingIf (== 0) .: (-)) m rm
 
-          -- TODO : remove DEBUG --
-          deltam = M.differenceWith (nothingIf (== 0) .: (+)) m' $
-                   (0-) <$> countJoints ss'
-      if not $ M.null deltam then error $ "counts discrepancy: " ++ show deltam
-      else go mdl' ss' m' -- continue
+    -- TODO : remove DEBUG --
+
+          deltam = M.filter (uncurry (/=)) $
+                   mergeMaps  m' $ countJoints ss'
+      if not $ M.null deltam
+        then error $ "counts discrepancy: " ++ show deltam
+        else go mdl' ss' m' -- continue
+
+    mergeMaps :: Ord a => M.Map a b -> M.Map a b -> M.Map a (Maybe b, Maybe b)
+    mergeMaps = M.mergeWithKey
+     (\_ v1 v2 -> Just (Just v1, Just v2))
+     (M.mapMaybeWithKey (\_ v1 -> Just (Just v1, Nothing)))
+     (M.mapMaybeWithKey (\_ v2 -> Just (Nothing, Just v2)))
+
+    --
 
     showCdt rs (loss,(s0,s1),n01) =
       show loss ++ ": "
       ++ showJoint rs s0 s1
       ++ " (" ++ show n01 ++ ")"
 
-    showJoint rs s0 s1 = "\"" ++ R.toString rs [s0]
-      ++ "\" + \"" ++ R.toString rs [s1]
-      ++ "\" ==> \"" ++ R.toString rs [s0,s1] ++ "\""
+    showJoint rs s0 s1 = "\"" ++ R.toEscapedString rs [s0]
+      ++ "\" + \"" ++ R.toEscapedString rs [s1]
+      ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\""
 
     newPB n message = newProgressBar style 10 (Progress 0 n ())
       where
@@ -101,45 +112,51 @@ main = do
 
     incPB pb = incProgress pb 1
 
-rewrite :: (Int, Int) -> Int -> [Int] -> ([Int], Map (Int, Int) Int)
+rewrite :: (Int, Int) -> Int -> [Int] -> ([Int], ( Map (Int, Int) Int
+                                                 , Map (Int, Int) Int ))
 rewrite = S.lazily . runIdentity . S.toList .:. rewriteM
 
 -- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
 -- a delta of the counts of candidates in the string after the
 -- application of the rule relative to before.
 rewriteM :: Monad m => (Int, Int) -> Int -> [Int] ->
-            Stream (Of Int) m (Map (Int, Int) Int)
+            Stream (Of Int) m ( Map (Int, Int) Int
+                              , Map (Int, Int) Int )
 rewriteM (s0,s1) s01 str = case str of
-  [] -> return M.empty
-  [s] -> S.yield s >> return M.empty
+  [] -> return (M.empty, M.empty)
+  [s] -> S.yield s >> return (M.empty, M.empty)
   s:s':ss | s == s0 && s' == s1 -> do
               S.yield s01
-              go s01 ss (M.singleton (s0,s1) (-1))
+              go s01 ss M.empty $ M.singleton (s0,s1) (-1)
 
           | otherwise -> do
               S.yield s
-              go s (s':ss) M.empty
+              go s (s':ss) M.empty M.empty
   where
     inc s0s1 = M.insertWith (+) s0s1 1
-    dec s0s1 = M.insertWith (+) s0s1 (-1)
 
-    go _ []  !m = return m
-    go _ [s] !m = S.yield s >> return m
-    go prev (s:s':ss) !m
-      | s == s0 && s' == s1 = S.yield s01 >> go s01 ss (f m)
-      | otherwise = S.yield s >> go s (s':ss) m
+    go _ [] !am !rm = return (am, rm)
+    go _ [s] !am !rm = S.yield s >> return (am, rm)
+    go prev (s:s':ss) !am !rm
+      | s == s0 && s' == s1 = S.yield s01 >>
+                              go s01 ss am'' rm''
+      | otherwise = S.yield s >>
+                    go s (s':ss) am rm
       where
-        f = dec (s0,s1) . deltaPrev . deltaNext
-        deltaPrev | prev == s01 = inc (s01,s01)
-                  | otherwise = dec (prev,s0)
-                                . inc (prev,s01)
-        deltaNext = case subst ss of
-          (s'':_) | s'' /= s01 -> dec (s1,s'') -- rm with next
-                                  . inc (s01,s'')
-          -- if s'' == s01 then [s01,s01] will be counted in deltaPrev
-          _else -> id
+        (am',rm') | prev == s01 = ( inc (s01,s01) am
+                                  , inc (s0,s1) rm )
+                  | otherwise = ( inc (prev,s01) am
+                                , inc (prev,s0) $
+                                  inc (s0,s1) rm )
 
-    -- go, without the count deltas
+        (am'', rm'')
+          | (next:_) <- subst ss =
+              ( if next == s01 then am' else inc (s01,next) am'
+              , if s0 == s1 && s1 == next then rm' else inc (s1,next) rm' )
+          -- if next == s01 then [s01,s01] will be inc'd when self is prev
+          | otherwise = (am', rm')
+
+    -- go without counting
     subst [] = []
     subst [s] = [s]
     subst (s:s':ss) | s == s0 && s' == s1 = s01:subst ss

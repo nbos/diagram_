@@ -116,6 +116,17 @@ toString = UTF8.toString
            .: concatMap
            . extension
 
+toEscapedString :: Rules -> [Int] -> String
+toEscapedString = concatMap escapeChar .: toString
+  where
+    escapeChar '\n' = "\\n"    -- Replace newline with \n
+    escapeChar '\t' = "\\t"    -- Replace tab with \t
+    escapeChar '\r' = "\\r"    -- Replace carriage return with \r
+    escapeChar '\\' = "\\\\"   -- Replace backslash with \\
+    escapeChar '\"' = "\\\""   -- Replace double quote with \"
+    escapeChar '\'' = "\\'"    -- Replace single quote with \'
+    escapeChar c    = [c]      -- Leave other characters unchanged
+
 --------------
 -- INDEXING --
 --------------
