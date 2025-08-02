@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, TupleSections #-}
+{-# LANGUAGE LambdaCase, TupleSections, ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
@@ -9,13 +9,19 @@ import System.Exit
 import System.ProgressBar
 
 import Control.Monad
+import Control.Monad.ST
 import Control.Exception (evaluate)
+import Control.Monad.State.Strict
+
+import Data.STRef
+import Data.Maybe
+import Data.Tuple.Extra
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.ByteString as BS
 
-import Streaming
+import Streaming hiding (first,second)
 import qualified Streaming.Prelude as S
 
 import Diagram.Model
@@ -76,10 +82,18 @@ main = do
 
     -- TODO : remove DEBUG --
 
-          deltam = M.filter (uncurry (/=)) $
-                   mergeMaps  m' $ countJoints ss'
+          deltam = M.filter (uncurry (/=)) $ mergeMaps  m' $
+                   countJoints ss'
+
       if not $ M.null deltam
-        then error $ "counts discrepancy: " ++ show deltam
+        then error $ "counts discrepancy (act,exp): " ++ show deltam
+             ++ "\njust added: "
+             ++ show (mapMaybe (\k -> (k,) <$> (am M.!? k)) $
+                       M.keys deltam)
+             ++ "\njust removed: "
+             ++ show (mapMaybe (\k -> (k,) <$> (rm M.!? k)) $
+                       M.keys deltam )
+
         else go mdl' ss' m' -- continue
 
     mergeMaps :: Ord a => M.Map a b -> M.Map a b -> M.Map a (Maybe b, Maybe b)
@@ -119,51 +133,101 @@ rewrite = S.lazily . runIdentity . S.toList .:. rewriteM
 -- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
 -- a delta of the counts of candidates in the string after the
 -- application of the rule relative to before.
-rewriteM :: Monad m => (Int, Int) -> Int -> [Int] ->
+rewriteM :: forall m. Monad m => (Int, Int) -> Int -> [Int] ->
             Stream (Of Int) m ( Map (Int, Int) Int
                               , Map (Int, Int) Int )
-rewriteM (s0,s1) s01 str = case str of
-  [] -> return (M.empty, M.empty)
-  [s] -> S.yield s >> return (M.empty, M.empty)
-  s:s':ss | s == s0 && s' == s1 -> do
-              S.yield s01
-              go s01 ss M.empty $ M.singleton (s0,s1) (-1)
-
-          | otherwise -> do
-              S.yield s
-              go s (s':ss) M.empty M.empty
+rewriteM (s0,s1) s01 = fmap snd
+                       . flip runStateT (M.empty, M.empty)
+                       . distribute
+                       . go Nothing
   where
-    inc s0s1 = M.insertWith (+) s0s1 1
+    inc = lift . modify . first . flip (M.insertWith (+)) 1
+    dec = lift . modify . second . flip (M.insertWith (+)) 1
 
-    go _ [] !am !rm = return (am, rm)
-    go _ [s] !am !rm = S.yield s >> return (am, rm)
-    go prev (s:s':ss) !am !rm
-      | s == s0 && s' == s1 = S.yield s01 >>
-                              go s01 ss am'' rm''
+    go :: Maybe Int -> [Int] ->
+          Stream (Of Int) (StateT ( Map (Int, Int) Int
+                                  , Map (Int, Int) Int ) m) ()
+    go _ [] = return () -- end
+    go _ [s] = S.yield s
+    go prev (s:s':ss)
+      | s == s0 && s' == s1 = do
+          S.yield s01
+
+          -- w/ prev
+          forM_ prev $ \sp -> do
+            dec (sp,s0)
+            inc (sp,s01)
+
+          -- within
+          dec (s0,s1)
+
+          -- w/ next
+          case ss of
+            [] -> return () -- end
+            s'':ss' -> do
+              -- special cases
+              if s'' == s0 then do
+
+                -- if s0 == s1 == s''
+                -- then (s1,s'') isn't constructable
+                unless (s0 == s1) $ dec (s1,s'')
+
+                -- check if next is s01
+                case ss' of
+                  [] -> inc (s01,s'') -- end
+                  s''':ss''
+                    | s''' == s1 -> do -- it is
+                        inc (s01,s01)
+                        S.yield s01
+                        case ss'' of
+                          [] -> return () -- end
+                          s'''':s''' -> do
+                            undefined
+
+                    | otherwise -> inc (s01,s'')
+
+              -- usual case
+              else do
+                dec (s1,s'')
+                inc (s01,s'')
+
       | otherwise = S.yield s >>
-                    go s (s':ss) am rm
-      where
-        (am',rm') | prev == s01 = ( inc (s01,s01) am
-                                  , inc (s0,s1) rm )
-                  | otherwise = ( inc (prev,s01) am
-                                , inc (prev,s0) $
-                                  inc (s0,s1) rm )
+                    go (Just s) (s':ss)
 
-        (am'', rm'')
-          | (next:_) <- subst ss =
-              ( if next == s01 then am' else inc (s01,next) am'
-              , if s0 == s1 && s1 == next then rm' else inc (s1,next) rm' )
-          -- if next == s01 then [s01,s01] will be inc'd when self is prev
-          | otherwise = (am', rm')
-
-    -- go without counting
-    subst [] = []
-    subst [s] = [s]
-    subst (s:s':ss) | s == s0 && s' == s1 = s01:subst ss
-                    | otherwise = s:subst (s':ss)
+    -- -- go without counting
+    -- subst [] = []
+    -- subst [s] = [s]
+    -- subst (s:s':ss) | s == s0 && s' == s1 = s01:subst ss
+    --                 | otherwise = s:subst (s':ss)
 
 countJoints :: [Int] -> Map (Int,Int) Int
 countJoints = fst . runIdentity . countJointsM . S.each
+
+countJoints' :: [Int] -> Map (Int,Int) Int
+countJoints' = go M.empty
+  where
+    go !m [] = m
+    go !m [_] = m
+    go !m [s0,s1] = M.insertWith (+) (s0,s1) 1 m
+    go !m (s0:s1:s2:ss)
+      | s0 == s1 && s1 == s2 = go m' (s2:ss)
+      | otherwise = go m' (s1:s2:ss)
+      where
+        m' = M.insertWith (+) (s0,s1) 1 m
+
+countJointsOf :: Int -> [Int] -> Map (Int,Int) Int
+countJointsOf s = go M.empty
+  where
+    go !m [] = m
+    go !m [_] = m
+    go !m (s0:s1:ss)
+      | s0 == s || s1 == s = case ss of
+          s2:_ | s0 == s1
+               , s2 == s2 -> go m' ss
+          _else -> go m' (s1:ss)
+      | otherwise = go m (s1:ss)
+      where
+        m' = M.insertWith (+) (s0,s1) 1 m
 
 countJointsM :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
 countJointsM = go M.empty
