@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, TupleSections, ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase, TupleSections, ScopedTypeVariables, TypeApplications #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
@@ -6,7 +6,6 @@ module Diagram (module Diagram) where
 import Debug.Trace
 import System.Environment (getArgs)
 import System.Exit
-import System.ProgressBar
 
 import Control.Monad
 import Control.Monad.ST
@@ -21,11 +20,15 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.ByteString as BS
 
+import qualified Data.Vector.Unboxed as U
+import qualified Data.Vector.Generic.Mutable as MV
+
 import Streaming hiding (first,second)
 import qualified Streaming.Prelude as S
 
 import Diagram.Model
 import qualified Diagram.Rules as R
+import Diagram.Progress
 import Diagram.Util
 
 main :: IO ()
@@ -64,8 +67,8 @@ main = do
           putStrLn ""
           return c
 
-      when (loss > 0) ( putStrLn "Reached minimum. Terminating."
-                        >> exitSuccess )
+      when (loss > 0) ( putStrLn "Reached minimum. Terminating." >>
+                        exitSuccess )
 
       let (s01, mdl'@(Model _ n' _)) = push mdl (s0,s1) n01
 
@@ -74,8 +77,8 @@ main = do
 
       pb2 <- newPB n' "Rewriting string"
       (ss', (am,rm)) <- fmap S.lazily $ S.toList $
-                       S.mapM (\s -> incPB pb2 >> return s) $
-                       rewriteM (s0,s1) s01 ss
+                        S.mapM (\s -> incPB pb2 >> return s) $
+                        rewriteM (s0,s1) s01 ss
 
       let m' = M.unionWith (+) am $
                M.differenceWith (nothingIf (== 0) .: (-)) m rm
@@ -113,98 +116,94 @@ main = do
       ++ "\" + \"" ++ R.toEscapedString rs [s1]
       ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\""
 
-    newPB n message = newProgressBar style 10 (Progress 0 n ())
-      where
-        style = defStyle{
-          stylePrefix = msg (message <> " ") <> exact,
-          stylePostfix = percentage <> msg "% ETA: "
-                         <> remainingTime renderDuration "00"
-                         <> msg " DUR: " <> elapsedTime renderDuration,
-          styleDone = '#',
-          styleCurrent = '#',
-          styleTodo = '-' }
-
-    incPB pb = incProgress pb 1
-
 rewrite :: (Int, Int) -> Int -> [Int] -> ([Int], ( Map (Int, Int) Int
                                                  , Map (Int, Int) Int ))
 rewrite = S.lazily . runIdentity . S.toList .:. rewriteM
 
--- | Rewrite the symbol string with a new rule [s01/(s0,s1)] and return
--- a delta of the counts of candidates in the string after the
--- application of the rule relative to before.
 rewriteM :: forall m. Monad m => (Int, Int) -> Int -> [Int] ->
             Stream (Of Int) m ( Map (Int, Int) Int
                               , Map (Int, Int) Int )
-rewriteM (s0,s1) s01 = fmap snd
-                       . flip runStateT (M.empty, M.empty)
-                       . distribute
-                       . go Nothing
+rewriteM = undefined
+
+-- | Substitute a pair of symbols for a constructed joint symbol in a
+-- string of symbols
+subst :: (Int,Int) -> Int -> [Int] -> [Int]
+subst (s0,s1) s01 = go
   where
-    inc = lift . modify . first . flip (M.insertWith (+)) 1
-    dec = lift . modify . second . flip (M.insertWith (+)) 1
+    go [] = []
+    go [s] = [s]
+    go (s:s':ss) | s == s0 && s' == s1 = s01:go ss
+                 | otherwise = s:go (s':ss)
 
-    go :: Maybe Int -> [Int] ->
-          Stream (Of Int) (StateT ( Map (Int, Int) Int
-                                  , Map (Int, Int) Int ) m) ()
-    go _ [] = return () -- end
-    go _ [s] = S.yield s
-    go prev (s:s':ss)
-      | s == s0 && s' == s1 = do
-          S.yield s01
+-- | Count the changes in counts (additions, removals) concerning the
+-- two parts of a newly substituted joint symbol in the given string
+recount :: (Int,Int) -> Int -> [Int] -> ( Map (Int, Int) Int
+                                        , Map (Int, Int) Int )
+recount (s0,s1) s01 str = runST $ do
+  s0s1ref <- newSTRef (0 :: Int) -- (s0,s1) (redundant but w/e)
+  s1s0ref <- newSTRef (0 :: Int) -- (s1,s0)
+  prevvec <- MV.replicate @_ @U.MVector s01 (0 :: Int) -- (i,s01)
+  nextvec <- MV.replicate @_ @U.MVector s01 (0 :: Int) -- (s01,i)
+  autoref <- newSTRef (0 :: Int) -- (s01,s01)
 
-          -- w/ prev
-          forM_ prev $ \sp -> do
-            dec (sp,s0)
-            inc (sp,s01)
+  let go _ [] = return ()
+      go prev (s:ss)
+        | s == s01 = case first ((+1) . length) $ span (== s01) ss of
+            (n, next:ss') -> do -- (typical case)
+              modifySTRef' s0s1ref (+n)
+              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
+              MV.modify prevvec (+1) prev
+              when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
+              modifySTRef' autoref (+(n `div` 2))
+              go next ss' -- continue
 
-          -- within
-          dec (s0,s1)
+            (n, []) -> do -- (end chunk; no next)
+              modifySTRef' s0s1ref (+n)
+              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
+              MV.modify prevvec (+1) prev
+              modifySTRef' autoref (+(n `div` 2))
 
-          -- w/ next
-          case ss of
-            [] -> return () -- end
-            s'':ss' -> do
-              -- special cases
-              if s'' == s0 then do
+        | otherwise = go s ss -- continue
 
-                -- if s0 == s1 == s''
-                -- then (s1,s'') isn't constructable
-                unless (s0 == s1) $ dec (s1,s'')
+  case str of
+    [] -> return ()
+    (s:ss)
+      | s == s01 -> do -- (start chunk, no prev)
+          case first ((+1) . length) $ span (== s01) ss of
+            (n, next:ss') -> do
+              modifySTRef' s0s1ref (+n)
+              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
+              when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
+              modifySTRef' autoref (+(n `div` 2))
+              go next ss' -- go
 
-                -- check if next is s01
-                case ss' of
-                  [] -> inc (s01,s'') -- end
-                  s''':ss''
-                    | s''' == s1 -> do -- it is
-                        inc (s01,s01)
-                        S.yield s01
-                        case ss'' of
-                          [] -> return () -- end
-                          s'''':s''' -> do
-                            undefined
+            (n, []) -> do -- (just s01s, no prev, no next)
+              modifySTRef' s0s1ref (+n)
+              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
+              modifySTRef' autoref (+(n `div` 2))
 
-                    | otherwise -> inc (s01,s'')
+      | otherwise -> go s ss -- go
 
-              -- usual case
-              else do
-                dec (s1,s'')
-                inc (s01,s'')
+  amref <- newSTRef M.empty
+  rmref <- newSTRef M.empty
 
-      | otherwise = S.yield s >>
-                    go (Just s) (s':ss)
+  -- read
+  modifySTRef' rmref . M.insert (s0,s1) =<< readSTRef s0s1ref
+  modifySTRef' rmref . M.insert (s1,s0) =<< readSTRef s1s0ref
+  MV.iforM_ prevvec $ \prev n -> when (n > 0) $ do
+    modifySTRef' rmref $ M.insert (prev,s0) n
+    modifySTRef' amref $ M.insert (prev,s01) n
+  MV.iforM_ nextvec $ \next n -> when (n > 0) $ do
+    modifySTRef' rmref $ M.insert (s1,next) n
+    modifySTRef' amref $ M.insert (s01,next) n
+  modifySTRef' amref . M.insert (s01,s01) =<< readSTRef autoref
 
-    -- -- go without counting
-    -- subst [] = []
-    -- subst [s] = [s]
-    -- subst (s:s':ss) | s == s0 && s' == s1 = s01:subst ss
-    --                 | otherwise = s:subst (s':ss)
+  am <- readSTRef amref
+  rm <- readSTRef rmref
+  return (am, rm)
 
 countJoints :: [Int] -> Map (Int,Int) Int
-countJoints = fst . runIdentity . countJointsM . S.each
-
-countJoints' :: [Int] -> Map (Int,Int) Int
-countJoints' = go M.empty
+countJoints = go M.empty -- fst . runIdentity . countJointsM . S.each
   where
     go !m [] = m
     go !m [_] = m
@@ -215,6 +214,7 @@ countJoints' = go M.empty
       where
         m' = M.insertWith (+) (s0,s1) 1 m
 
+-- | (redundant) counts the joints concerning one symbol
 countJointsOf :: Int -> [Int] -> Map (Int,Int) Int
 countJointsOf s = go M.empty
   where
