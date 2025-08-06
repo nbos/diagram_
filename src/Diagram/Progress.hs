@@ -38,8 +38,7 @@ newPB n message = newProgressBar style 10 (Progress 0 n ())
                      <> msg " DUR: " <> elapsedTime renderDuration,
       styleDone = '#',
       styleCurrent = '#',
-      styleTodo = '-',
-      styleOnComplete = Clear }
+      styleTodo = '-' }
 
 -- | Create a new ProgressBar for an undetermined amount of work to do
 -- given a label
@@ -53,8 +52,7 @@ newPB' message = newProgressBar style 10 (Progress 0 (2^(28::Int)) ())
                      <> msg " DUR: " <> elapsedTime renderDuration,
       styleDone = '#',
       styleCurrent = '#',
-      styleTodo = '-',
-      styleOnComplete = Clear }
+      styleTodo = '-' }
     
     customExact = Label $ \progress _ -> 
       Text.pack $ show (progressDone progress) ++ "/??"

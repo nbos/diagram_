@@ -8,13 +8,10 @@ import System.Environment (getArgs)
 import System.Exit
 
 import Control.Monad
-import Control.Monad.ST
 import Control.Monad.Primitive
 import Control.Exception (evaluate)
 
-import Data.STRef
 import Data.Maybe
-import Data.Tuple.Extra
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -85,12 +82,12 @@ main = do
                     S.mapM (\s -> incPB pb2 >> return s) $
                     S.each ss'
 
-      let m' = M.unionWith (+) am $
-               M.differenceWith (nothingIf (== 0) .: (-)) m rm
+      let m' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id (traceShowId am) $
+               M.differenceWith (nothingIf (== 0) .: (-)) m (traceShowId rm)
 
     -- TODO : remove DEBUG --
 
-          deltam = M.filter (uncurry (/=)) $ mergeMaps  m' $
+          deltam = M.filter (uncurry (/=)) $ mergeMaps m' $
                    countJoints ss'
 
       if not $ M.null deltam
@@ -122,15 +119,6 @@ main = do
       ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
       ++ show (s0,s1)
 
-rewrite :: (Int, Int) -> Int -> [Int] -> ([Int], ( Map (Int, Int) Int
-                                                 , Map (Int, Int) Int ))
-rewrite = S.lazily . runIdentity . S.toList .:. rewriteM
-
-rewriteM :: Monad m => (Int, Int) -> Int -> [Int] ->
-            Stream (Of Int) m ( Map (Int, Int) Int
-                              , Map (Int, Int) Int )
-rewriteM = undefined
-
 -- | Substitute a pair of symbols for a constructed joint symbol in a
 -- string of symbols
 subst :: (Int,Int) -> Int -> [Int] -> [Int]
@@ -143,71 +131,6 @@ subst (s0,s1) s01 = go
 
 -- | Count the changes in counts (additions, removals) concerning the
 -- two parts of a newly substituted joint symbol in the given string
-recount :: (Int,Int) -> Int -> [Int] -> ( Map (Int, Int) Int
-                                        , Map (Int, Int) Int )
-recount (s0,s1) s01 str = runST $ do
-  s0s1ref <- newSTRef (0 :: Int) -- (s0,s1) (redundant but w/e)
-  s1s0ref <- newSTRef (0 :: Int) -- (s1,s0)
-  prevvec <- MV.replicate @_ @U.MVector s01 (0 :: Int) -- (i,s01)
-  nextvec <- MV.replicate @_ @U.MVector s01 (0 :: Int) -- (s01,i)
-  autoref <- newSTRef (0 :: Int) -- (s01,s01)
-
-  let go _ [] = return ()
-      go prev (s:ss)
-        | s == s01 = case first ((+1) . length) $ span (== s01) ss of
-            (n, next:ss') -> do -- (typical case)
-              modifySTRef' s0s1ref (+n)
-              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
-              MV.modify prevvec (+1) prev
-              when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
-              modifySTRef' autoref (+(n `div` 2))
-              go next ss' -- continue
-
-            (n, []) -> do -- (end chunk; no next)
-              modifySTRef' s0s1ref (+n)
-              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
-              MV.modify prevvec (+1) prev
-              modifySTRef' autoref (+(n `div` 2))
-
-        | otherwise = go s ss -- continue
-
-  case str of
-    [] -> return ()
-    (s:ss)
-      | s == s01 -> do -- (start chunk, no prev)
-          case first ((+1) . length) $ span (== s01) ss of
-            (n, next:ss') -> do
-              modifySTRef' s0s1ref (+n)
-              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
-              when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
-              modifySTRef' autoref (+(n `div` 2))
-              go next ss' -- go
-
-            (n, []) -> do -- (just s01s, no prev, no next)
-              modifySTRef' s0s1ref (+n)
-              when (s0 /= s1) $ modifySTRef' s1s0ref (+(n-1))
-              modifySTRef' autoref (+(n `div` 2))
-
-      | otherwise -> go s ss -- go
-
-  amref <- newSTRef M.empty
-  rmref <- newSTRef M.empty
-
-  -- read
-  modifySTRef' rmref . M.insert (s0,s1) =<< readSTRef s0s1ref
-  modifySTRef' rmref . M.insert (s1,s0) =<< readSTRef s1s0ref
-  MV.iforM_ prevvec $ \prev n -> when (n > 0) $ do
-    modifySTRef' rmref $ M.insert (prev,s0) n
-    modifySTRef' amref $ M.insert (prev,s01) n
-  MV.iforM_ nextvec $ \next n -> when (n > 0) $ do
-    modifySTRef' rmref $ M.insert (s1,next) n
-    modifySTRef' amref $ M.insert (s01,next) n
-  modifySTRef' amref . M.insert (s01,s01) =<< readSTRef autoref
-
-  am <- readSTRef amref
-  rm <- readSTRef rmref
-  return (am, rm)
-
 recountM :: forall m r. PrimMonad m => (Int,Int) -> Int ->
             Stream (Of Int) m r -> m ( Map (Int, Int) Int
                                      , Map (Int, Int) Int, r)
@@ -236,7 +159,7 @@ recountM (s0,s1) s01 str0 = do
                   modifyPrimRef s0s1ref (+n)
                   when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
                   MV.modify prevvec (+1) prev
-                  when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
+                  MV.modify nextvec (+1) next
                   modifyPrimRef autoref (+(n `div` 2))
                   go next ss'' -- continue
 
@@ -257,7 +180,7 @@ recountM (s0,s1) s01 str0 = do
             Right (next,ss'') -> do
               modifyPrimRef s0s1ref (+n)
               when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
-              when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
+              MV.modify nextvec (+1) next
               modifyPrimRef autoref (+(n `div` 2))
               go next ss'' -- go
 
@@ -267,16 +190,23 @@ recountM (s0,s1) s01 str0 = do
   rmref <- newPrimRef @B.MVector M.empty
 
   -- read
-  modifyPrimRef rmref . M.insert (s0,s1) =<< readPrimRef s0s1ref
-  when (s0 /= s1) $
-    modifyPrimRef rmref . M.insert (s1,s0) =<< readPrimRef s1s0ref
+  do n <- readPrimRef s0s1ref
+     when (n > 0) $ modifyPrimRef rmref $ M.insert (s0,s1) n
+
+  when (s0 /= s1) $ do
+    n <- readPrimRef s1s0ref
+    when (n > 0) $ modifyPrimRef rmref $ M.insert (s1,s0) n
+
   MV.iforM_ prevvec $ \prev n -> when (n > 0) $ do
-    modifyPrimRef rmref $ M.insert (prev,s0) n
+    modifyPrimRef rmref $ M.insertWith (+) (prev,s0) n
     modifyPrimRef amref $ M.insert (prev,s01) n
   MV.iforM_ nextvec $ \next n -> when (n > 0) $ do
-    modifyPrimRef rmref $ M.insert (s1,next) n
+    when (s0 /= s1 || s1 /= next) $
+      modifyPrimRef rmref $ M.insertWith (+) (s1,next) n
     modifyPrimRef amref $ M.insert (s01,next) n
-  modifyPrimRef amref . M.insert (s01,s01) =<< readPrimRef autoref
+
+  do n <- readPrimRef autoref
+     when (n > 0) $ modifyPrimRef amref $ M.insert (s01,s01) n
 
   am <- readPrimRef amref
   rm <- readPrimRef rmref
