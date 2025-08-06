@@ -9,8 +9,8 @@ import System.Exit
 
 import Control.Monad
 import Control.Monad.ST
+import Control.Monad.Primitive
 import Control.Exception (evaluate)
-import Control.Monad.State.Strict
 
 import Data.STRef
 import Data.Maybe
@@ -22,8 +22,10 @@ import qualified Data.ByteString as BS
 
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
+import qualified Data.Vector.Strict as B
 
 import Streaming hiding (first,second)
+import qualified Streaming as S
 import qualified Streaming.Prelude as S
 
 import Diagram.Model
@@ -75,10 +77,13 @@ main = do
       traceShow mdl' $ putStrLn "New rule:"
       putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
 
-      pb2 <- newPB n' "Rewriting string"
-      (ss', (am,rm)) <- fmap S.lazily $ S.toList $
-                        S.mapM (\s -> incPB pb2 >> return s) $
-                        rewriteM (s0,s1) s01 ss
+      ss' <- pbSeq n' "Rewriting string" $
+             subst (s0,s1) s01 ss
+
+      pb2 <- newPB n' "Updating counts"
+      (am,rm,()) <- recountM (s0,s1) s01 $
+                    S.mapM (\s -> incPB pb2 >> return s) $
+                    S.each ss'
 
       let m' = M.unionWith (+) am $
                M.differenceWith (nothingIf (== 0) .: (-)) m rm
@@ -89,7 +94,7 @@ main = do
                    countJoints ss'
 
       if not $ M.null deltam
-        then error $ "counts discrepancy (act,exp): " ++ show deltam
+        then error $ "counts discrepancy (updated,recounted): " ++ show deltam
              ++ "\njust added: "
              ++ show (mapMaybe (\k -> (k,) <$> (am M.!? k)) $
                        M.keys deltam)
@@ -114,13 +119,14 @@ main = do
 
     showJoint rs s0 s1 = "\"" ++ R.toEscapedString rs [s0]
       ++ "\" + \"" ++ R.toEscapedString rs [s1]
-      ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\""
+      ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
+      ++ show (s0,s1)
 
 rewrite :: (Int, Int) -> Int -> [Int] -> ([Int], ( Map (Int, Int) Int
                                                  , Map (Int, Int) Int ))
 rewrite = S.lazily . runIdentity . S.toList .:. rewriteM
 
-rewriteM :: forall m. Monad m => (Int, Int) -> Int -> [Int] ->
+rewriteM :: Monad m => (Int, Int) -> Int -> [Int] ->
             Stream (Of Int) m ( Map (Int, Int) Int
                               , Map (Int, Int) Int )
 rewriteM = undefined
@@ -201,6 +207,92 @@ recount (s0,s1) s01 str = runST $ do
   am <- readSTRef amref
   rm <- readSTRef rmref
   return (am, rm)
+
+recountM :: forall m r. PrimMonad m => (Int,Int) -> Int ->
+            Stream (Of Int) m r -> m ( Map (Int, Int) Int
+                                     , Map (Int, Int) Int, r)
+recountM (s0,s1) s01 str0 = do
+  s0s1ref <- newPrimRef @U.MVector (0 :: Int) -- (s0,s1) (redundant but w/e)
+  s1s0ref <- newPrimRef @U.MVector (0 :: Int) -- (s1,s0)
+  prevvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (i,s01)
+  nextvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (s01,i)
+  autoref <- newPrimRef @U.MVector (0 :: Int) -- (s01,s01)
+
+  let go :: Int -> Stream (Of Int) m r -> m r
+      go prev str = (S.next str >>=) $ \case
+        Left r -> return r
+        Right (s,ss)
+          | s == s01 -> do
+              n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
+              (S.next ss' >>=) $ \case
+                Left r -> do -- (end chunk; no next)
+                  modifyPrimRef s0s1ref (+n)
+                  when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+                  MV.modify prevvec (+1) prev
+                  modifyPrimRef autoref (+(n `div` 2))
+                  return r
+
+                Right (next,ss'') -> do -- (typical case)
+                  modifyPrimRef s0s1ref (+n)
+                  when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+                  MV.modify prevvec (+1) prev
+                  when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
+                  modifyPrimRef autoref (+(n `div` 2))
+                  go next ss'' -- continue
+
+          | otherwise -> go s ss -- continue
+
+  r <- (S.next str0 >>=) $ \case
+    Left r -> return r
+    Right (s,ss)
+      | s == s01 -> do -- (start chunk, no prev)
+          n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
+          (S.next ss' >>=) $ \case
+            Left r -> do -- (just s01s)
+              modifyPrimRef s0s1ref (+n)
+              when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+              modifyPrimRef autoref (+(n `div` 2))
+              return r
+
+            Right (next,ss'') -> do
+              modifyPrimRef s0s1ref (+n)
+              when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+              when (s0 /= s1 || s1 /= next) $ MV.modify nextvec (+1) next
+              modifyPrimRef autoref (+(n `div` 2))
+              go next ss'' -- go
+
+      | otherwise -> go s ss -- go
+
+  amref <- newPrimRef @B.MVector M.empty
+  rmref <- newPrimRef @B.MVector M.empty
+
+  -- read
+  modifyPrimRef rmref . M.insert (s0,s1) =<< readPrimRef s0s1ref
+  when (s0 /= s1) $
+    modifyPrimRef rmref . M.insert (s1,s0) =<< readPrimRef s1s0ref
+  MV.iforM_ prevvec $ \prev n -> when (n > 0) $ do
+    modifyPrimRef rmref $ M.insert (prev,s0) n
+    modifyPrimRef amref $ M.insert (prev,s01) n
+  MV.iforM_ nextvec $ \next n -> when (n > 0) $ do
+    modifyPrimRef rmref $ M.insert (s1,next) n
+    modifyPrimRef amref $ M.insert (s01,next) n
+  modifyPrimRef amref . M.insert (s01,s01) =<< readPrimRef autoref
+
+  am <- readPrimRef amref
+  rm <- readPrimRef rmref
+  return (am, rm, r)
+
+  where
+    newPrimRef :: MV.MVector v a => a -> m (v (PrimState m) a)
+    newPrimRef = MV.replicate 1
+
+    modifyPrimRef :: MV.MVector v a => v (PrimState m) a ->
+                     (a -> a) -> m ()
+    modifyPrimRef v f = MV.modify v f 0
+
+    readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
+    readPrimRef = flip MV.read 0
+
 
 countJoints :: [Int] -> Map (Int,Int) Int
 countJoints = go M.empty -- fst . runIdentity . countJointsM . S.each
