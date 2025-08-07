@@ -1,9 +1,8 @@
-{-# LANGUAGE LambdaCase, TupleSections, ScopedTypeVariables, TypeApplications #-}
+{-# LANGUAGE LambdaCase, ScopedTypeVariables, TypeApplications #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
 
-import Debug.Trace
 import System.Environment (getArgs)
 import System.Exit
 
@@ -11,7 +10,6 @@ import Control.Monad
 import Control.Monad.Primitive
 import Control.Exception (evaluate)
 
-import Data.Maybe
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -72,7 +70,7 @@ main = do
 
       let (s01, mdl'@(Model _ n' _)) = push mdl (s0,s1) n01
 
-      traceShow mdl' $ putStrLn "New rule:"
+      putStrLn "New rule:"
       putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
 
       ss' <- pbSeq n' "Rewriting string" $
@@ -83,32 +81,9 @@ main = do
                     S.mapM (\s -> incPB pb2 >> return s) $
                     S.each ss'
 
-      let m' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id am $
-               M.differenceWith (nothingIf (== 0) .: (-)) m rm
-
-    -- TODO : remove DEBUG --
-
-          deltam = M.filter (uncurry (/=)) $ mergeMaps m' $
-                   countJoints ss'
-
-      if not $ M.null deltam
-        then error $ "counts discrepancy (updated,recounted): " ++ show deltam
-             ++ "\njust added: "
-             ++ show (mapMaybe (\k -> (k,) <$> (am M.!? k)) $
-                       M.keys deltam)
-             ++ "\njust removed: "
-             ++ show (mapMaybe (\k -> (k,) <$> (rm M.!? k)) $
-                       M.keys deltam )
-
-        else go mdl' ss' m' -- continue
-
-    mergeMaps :: Ord a => M.Map a b -> M.Map a b -> M.Map a (Maybe b, Maybe b)
-    mergeMaps = M.mergeWithKey
-     (\_ v1 v2 -> Just (Just v1, Just v2))
-     (M.mapMaybeWithKey (\_ v1 -> Just (Just v1, Nothing)))
-     (M.mapMaybeWithKey (\_ v2 -> Just (Nothing, Just v2)))
-
-    --
+      go mdl' ss' $
+        M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id am $
+        M.differenceWith (nothingIf (== 0) .: (-)) m rm
 
     showCdt rs (loss,(s0,s1),n01) =
       show loss ++ ": "
@@ -119,6 +94,24 @@ main = do
       ++ "\" + \"" ++ R.toEscapedString rs [s1]
       ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
       ++ show (s0,s1)
+
+    -- DEBUG --
+    --       deltam = M.filter (uncurry (/=)) $ mergeMaps m' $
+    --                countJoints ss'
+    --   if not $ M.null deltam
+    --     then error $ "counts discrepancy (updated,recounted): " ++ show deltam
+    --          ++ "\njust added: "
+    --          ++ show (mapMaybe (\k -> (k,) <$> (am M.!? k)) $
+    --                    M.keys deltam)
+    --          ++ "\njust removed: "
+    --          ++ show (mapMaybe (\k -> (k,) <$> (rm M.!? k)) $
+    --                    M.keys deltam )
+    --     else go mdl' ss' m' -- continue
+    -- mergeMaps :: Ord a => M.Map a b -> M.Map a b -> M.Map a (Maybe b, Maybe b)
+    -- mergeMaps = M.mergeWithKey
+    --  (\_ v1 v2 -> Just (Just v1, Just v2))
+    --  (M.mapMaybeWithKey (\_ v1 -> Just (Just v1, Nothing)))
+    --  (M.mapMaybeWithKey (\_ v2 -> Just (Nothing, Just v2)))
 
 -- | Substitute a pair of symbols for a constructed joint symbol in a
 -- string of symbols
@@ -148,52 +141,39 @@ recountM (s0,s1) s01 str0 = do
         Left r -> return r
         Right (s,ss)
           | s == s01 -> do
-              n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
-              modifyPrimRef s0s1ref (+n)
-              when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
               MV.modify prevvec (+1) prev
-
               -- parity check on ...-prev-s0
               when (not parity && prev == s0) $
                 modifyPrimRef correct $ IM.insertWith (+) prev 1
+              goMatch ss
 
-              modifyPrimRef autoref (+(n `div` 2))
-              (S.next ss' >>=) $ \case
-                Left r -> return r -- (end chunk; no next)
-                Right (next,ss'') -> do -- (typical case)
-                  MV.modify nextvec (+1) next
+          | otherwise -> go (s == s0 && not parity) s ss
 
-                  -- parity check on s1-next-...
-                  if s0 /= s1 && s1 == next then do
-                    n' :> ss''' <- S.length $ S.span (== next) ss''
-                    when (odd n') $
-                      modifyPrimRef correct $ IM.insertWith (+) next 1
-                    go (next == s0) next ss'''
-                    else do go (next == s0) next ss''
+      -- the part of `go` without the `prev` part is needed at the start
+      goMatch :: Stream (Of Int) m r -> m r
+      goMatch ss = do
+        n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
+        modifyPrimRef s0s1ref (+n)
+        when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
 
-          | otherwise -> go (s == s0 && not parity) s ss -- continue
+        modifyPrimRef autoref (+(n `div` 2))
+        (S.next ss' >>=) $ \case
+          Left r -> return r -- (end chunk; no next)
+          Right (next,ss'') -> do -- (typical case)
+            MV.modify nextvec (+1) next
+
+            -- parity check on s1-next-...
+            if s0 /= s1 && s1 == next then do
+              n' :> ss''' <- S.length $ S.span (== next) ss''
+              when (odd n') $
+                modifyPrimRef correct $ IM.insertWith (+) next 1
+              go (next == s0) next ss'''
+              else do go (next == s0) next ss''
 
   r <- (S.next str0 >>=) $ \case
     Left r -> return r
-    Right (s,ss)
-      | s == s01 -> do -- (start chunk, no prev)
-          n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
-          modifyPrimRef s0s1ref (+n)
-          when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
-          modifyPrimRef autoref (+(n `div` 2))
-          (S.next ss' >>=) $ \case
-            Left r -> return r -- (just s01s)
-            Right (next,ss'') -> do
-              MV.modify nextvec (+1) next
-
-              -- parity check on s1-next-...
-              if s0 /= s1 && s1 == next then do
-                n' :> ss''' <- S.length $ S.span (== next) ss''
-                when (odd n') $ modifyPrimRef correct $ IM.insertWith (+) next 1
-                go (next == s0) next ss''' -- go
-                else do go (next == s0) next ss'' -- go
-
-      | otherwise -> go (s == s0) s ss -- go
+    Right (s,ss) | s == s01 -> goMatch ss
+                 | otherwise -> go (s == s0) s ss
 
   amref <- newPrimRef @B.MVector M.empty
   rmref <- newPrimRef @B.MVector M.empty
