@@ -15,6 +15,7 @@ import Data.Maybe
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import qualified Data.IntMap.Strict as IM
 import qualified Data.ByteString as BS
 
 import qualified Data.Vector.Unboxed as U
@@ -82,8 +83,8 @@ main = do
                     S.mapM (\s -> incPB pb2 >> return s) $
                     S.each ss'
 
-      let m' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id (traceShowId am) $
-               M.differenceWith (nothingIf (== 0) .: (-)) m (traceShowId rm)
+      let m' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id am $
+               M.differenceWith (nothingIf (== 0) .: (-)) m rm
 
     -- TODO : remove DEBUG --
 
@@ -140,51 +141,59 @@ recountM (s0,s1) s01 str0 = do
   prevvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (i,s01)
   nextvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (s01,i)
   autoref <- newPrimRef @U.MVector (0 :: Int) -- (s01,s01)
+  correct <- newPrimRef @B.MVector IM.empty -- alignment correction
 
-  let go :: Int -> Stream (Of Int) m r -> m r
-      go prev str = (S.next str >>=) $ \case
+  let go :: Bool -> Int -> Stream (Of Int) m r -> m r
+      go parity prev str = (S.next str >>=) $ \case
         Left r -> return r
         Right (s,ss)
           | s == s01 -> do
               n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
+              modifyPrimRef s0s1ref (+n)
+              when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+              MV.modify prevvec (+1) prev
+
+              -- parity check on ...-prev-s0
+              when (not parity && prev == s0) $
+                modifyPrimRef correct $ IM.insertWith (+) prev 1
+
+              modifyPrimRef autoref (+(n `div` 2))
               (S.next ss' >>=) $ \case
-                Left r -> do -- (end chunk; no next)
-                  modifyPrimRef s0s1ref (+n)
-                  when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
-                  MV.modify prevvec (+1) prev
-                  modifyPrimRef autoref (+(n `div` 2))
-                  return r
-
+                Left r -> return r -- (end chunk; no next)
                 Right (next,ss'') -> do -- (typical case)
-                  modifyPrimRef s0s1ref (+n)
-                  when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
-                  MV.modify prevvec (+1) prev
                   MV.modify nextvec (+1) next
-                  modifyPrimRef autoref (+(n `div` 2))
-                  go next ss'' -- continue
 
-          | otherwise -> go s ss -- continue
+                  -- parity check on s1-next-...
+                  if s0 /= s1 && s1 == next then do
+                    n' :> ss''' <- S.length $ S.span (== next) ss''
+                    when (odd n') $
+                      modifyPrimRef correct $ IM.insertWith (+) next 1
+                    go (next == s0) next ss'''
+                    else do go (next == s0) next ss''
+
+          | otherwise -> go (s == s0 && not parity) s ss -- continue
 
   r <- (S.next str0 >>=) $ \case
     Left r -> return r
     Right (s,ss)
       | s == s01 -> do -- (start chunk, no prev)
           n :> ss' <- fmap (S.first (+1)) $ S.length $ S.span (== s01) ss
+          modifyPrimRef s0s1ref (+n)
+          when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+          modifyPrimRef autoref (+(n `div` 2))
           (S.next ss' >>=) $ \case
-            Left r -> do -- (just s01s)
-              modifyPrimRef s0s1ref (+n)
-              when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
-              modifyPrimRef autoref (+(n `div` 2))
-              return r
-
+            Left r -> return r -- (just s01s)
             Right (next,ss'') -> do
-              modifyPrimRef s0s1ref (+n)
-              when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
               MV.modify nextvec (+1) next
-              modifyPrimRef autoref (+(n `div` 2))
-              go next ss'' -- go
 
-      | otherwise -> go s ss -- go
+              -- parity check on s1-next-...
+              if s0 /= s1 && s1 == next then do
+                n' :> ss''' <- S.length $ S.span (== next) ss''
+                when (odd n') $ modifyPrimRef correct $ IM.insertWith (+) next 1
+                go (next == s0) next ss''' -- go
+                else do go (next == s0) next ss'' -- go
+
+      | otherwise -> go (s == s0) s ss -- go
 
   amref <- newPrimRef @B.MVector M.empty
   rmref <- newPrimRef @B.MVector M.empty
@@ -208,6 +217,10 @@ recountM (s0,s1) s01 str0 = do
   do n <- readPrimRef autoref
      when (n > 0) $ modifyPrimRef amref $ M.insert (s01,s01) n
 
+  do im <- readPrimRef correct
+     forM_ (IM.toList im) $ \(next,n) -> do
+       modifyPrimRef amref $ M.insertWith (+) (next,next) n
+
   am <- readPrimRef amref
   rm <- readPrimRef rmref
   return (am, rm, r)
@@ -215,14 +228,10 @@ recountM (s0,s1) s01 str0 = do
   where
     newPrimRef :: MV.MVector v a => a -> m (v (PrimState m) a)
     newPrimRef = MV.replicate 1
-
-    modifyPrimRef :: MV.MVector v a => v (PrimState m) a ->
-                     (a -> a) -> m ()
-    modifyPrimRef v f = MV.modify v f 0
-
+    modifyPrimRef :: MV.MVector v a => v (PrimState m) a -> (a -> a) -> m ()
+    modifyPrimRef v f = MV.modify v f 0 -- TODO: unsafe
     readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
-    readPrimRef = flip MV.read 0
-
+    readPrimRef = flip MV.read 0 -- TODO: unsafe
 
 countJoints :: [Int] -> Map (Int,Int) Int
 countJoints = go M.empty -- fst . runIdentity . countJointsM . S.each
