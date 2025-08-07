@@ -29,6 +29,16 @@ import qualified Diagram.Rules as R
 import Diagram.Progress
 import Diagram.Util
 
+toStream :: (PrimMonad m, MV.MVector v b) =>
+            v (PrimState m) b -> Stream (Of b) m ()
+toStream mv = S.mapM (MV.read mv) $
+              S.each [0.. MV.length mv - 1]
+
+writeStream :: (PrimMonad m, MV.MVector v b) =>
+               v (PrimState m) b -> Stream (Of b) m r -> m r
+writeStream mv = S.mapM_ (uncurry $ MV.write mv)
+                 . S.zip (S.enumFrom 0)
+
 main :: IO ()
 main = do
   args <- getArgs
@@ -37,53 +47,58 @@ main = do
       bytestring <- BS.readFile filename
       let len = BS.length bytestring
           as = BS.unpack bytestring
-          mdl = fromAtoms as
-          ss = fromEnum <$> as
+          mdl0 = fromAtoms as
+      ss <- U.thaw $ U.fromListN len $ fromEnum <$> as
       pb0 <- newPB len "Initializing joint counts"
-      (m,()) <- countJointsM $
-                S.mapM (\s -> incPB pb0 >> return s) $
-                S.each ss
-      go mdl ss m
+      (m0,()) <- countJointsM $
+                 S.mapM (\s -> incPB pb0 >> return s) $
+                 toStream ss
+
+      let go mdl@(Model rs n _) !m = do
+            pb1 <- newPB (M.size m) "Computing losses"
+            cdts <- forM (M.toList m) $ \(s0s1,n01) -> do
+                      loss <- evaluate $ infoDelta mdl s0s1 n01
+                      incPB pb1
+                      return (loss, s0s1, n01)
+
+            putStrLn "Sorting candidates..."
+            (loss,(s0,s1),n01) <- case L.sort cdts of
+              [] -> error "no candidates"
+              (c:cdts') -> do
+                putStrLn "Top candidates:"
+                forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
+                putStrLn ""
+                return c
+
+            when (loss > 0) ( putStrLn "Reached minimum. Terminating." >>
+                              exitSuccess )
+
+            let (s01, mdl'@(Model _ n' _)) = push mdl (s0,s1) n01
+
+            putStrLn "New rule:"
+            putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
+
+            pb2 <- newPB n' "Rewriting string"
+            writeStream ss $
+              S.mapM (\s -> incPB pb2 >> return s) $
+              substM (s0,s1) s01 $
+              toStream $ MV.take n ss
+
+            pb3 <- newPB n' "Updating counts"
+            (am,rm,()) <- recountM (s0,s1) s01 $
+                          S.mapM (\s -> incPB pb3 >> return s) $
+                          toStream $ MV.take n' ss
+
+            go mdl' $
+              M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id am $
+              M.differenceWith (nothingIf (== 0) .: (-)) m rm
+
+      go mdl0 m0
 
     _else -> do
       putStrLn "Usage: program <filename>"
       exitFailure
   where
-    go mdl@(Model rs _ _) ss !m = do
-      pb1 <- newPB (M.size m) "Computing losses"
-      cdts <- forM (M.toList m) $ \(s0s1,n01) -> do
-                loss <- evaluate $ infoDelta mdl s0s1 n01
-                incPB pb1
-                return (loss, s0s1, n01)
-
-      putStrLn "Sorting candidates..."
-      (loss,(s0,s1),n01) <- case L.sort cdts of
-        [] -> error "no candidates"
-        (c:cdts') -> do
-          putStrLn "Top candidates:"
-          forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
-          putStrLn ""
-          return c
-
-      when (loss > 0) ( putStrLn "Reached minimum. Terminating." >>
-                        exitSuccess )
-
-      let (s01, mdl'@(Model _ n' _)) = push mdl (s0,s1) n01
-
-      putStrLn "New rule:"
-      putStrLn $ "[" ++ show s01 ++ "]: " ++ showJoint rs s0 s1
-
-      ss' <- pbSeq n' "Rewriting string" $
-             subst (s0,s1) s01 ss
-
-      pb2 <- newPB n' "Updating counts"
-      (am,rm,()) <- recountM (s0,s1) s01 $
-                    S.mapM (\s -> incPB pb2 >> return s) $
-                    S.each ss'
-
-      go mdl' ss' $
-        M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id am $
-        M.differenceWith (nothingIf (== 0) .: (-)) m rm
 
     showCdt rs (loss,(s0,s1),n01) =
       show loss ++ ": "
@@ -122,6 +137,42 @@ subst (s0,s1) s01 = go
     go [s] = [s]
     go (s:s':ss) | s == s0 && s' == s1 = s01:go ss
                  | otherwise = s:go (s':ss)
+
+substM :: forall m r. Monad m => (Int, Int) -> Int ->
+          Stream (Of Int) m r -> Stream (Of Int) m r
+substM (s0,s1) s01 = go
+  where
+    go :: Stream (Of Int) m r -> Stream (Of Int) m r
+    go ss = (lift (S.next ss) >>=) $ \case
+      Left r -> return r
+      Right (s,ss') -> goCons s ss'
+
+    goCons s ss
+      | s == s0 = (lift (S.next ss) >>=) $ \case
+          Left r -> S.yield s >> return r
+          Right (s',ss')
+            | s' == s1 -> S.yield s01 >> go ss'
+            | otherwise -> S.yield s0 >> goCons s' ss'
+      | otherwise = S.yield s >> go ss
+
+subst' :: PrimMonad m => (Int, Int) -> Int -> U.MVector (PrimState m) Int -> m Int
+subst' (s0,s1) s01 mv = go 0 0
+  where
+    len = MV.length mv
+    go readIdx writeIdx
+      | readIdx < len - 1 = do
+          s <- MV.read mv readIdx
+          s' <- MV.read mv (readIdx + 1)
+          if s == s0 && s' == s1
+            then MV.write mv writeIdx s01 >>
+                 go (readIdx + 2) (writeIdx + 1)
+            else MV.write mv writeIdx s >>
+                 go (readIdx + 1) (writeIdx + 1)
+      | readIdx == len - 1 =
+          MV.read mv readIdx
+          >>= MV.write mv writeIdx
+          >> return (writeIdx + 1)
+      | otherwise = return writeIdx
 
 -- | Count the changes in counts (additions, removals) concerning the
 -- two parts of a newly substituted joint symbol in the given string
