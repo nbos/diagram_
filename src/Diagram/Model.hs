@@ -83,17 +83,30 @@ decode bv = do
   (ss, bv'''') <- Comb.decodeMultisetPermutation (zip [0..] ks) bv'''
   Just (model, ss, bv'''')
 
--- | Code length in bits of the serialization of the model + a sampled
--- symbol string
-codeLen :: Model -> Int
-codeLen (Model rs n ks) = rsCodeLen + nCodeLen
-                          + fromIntegral ksCodeLen
-                          + fromIntegral ssCodeLen
+-- | Code length in bits of the serialization of the model
+modelCodeLen :: Model -> Int
+modelCodeLen (Model rs n _) = rsCodeLen + nCodeLen
+                               + fromIntegral ksCodeLen
   where
     rsCodeLen = R.codeLen rs
     nCodeLen = BV.length $ Elias.encodeDelta $ fromIntegral n
     ksCodeLen = Var.codeLen1 $ Comb.countDistributions n $ R.numSymbols rs
-    ssCodeLen = Var.codeLen1 $ Comb.multinomial $ V.toList ks
+
+-- | Code length in bits of the serialization of a symbol string sampled
+-- from the given model
+stringCodeLen :: Model -> Int
+stringCodeLen (Model _ _ ks) = fromIntegral $ Var.codeLen1 $
+                               Comb.multinomial $ V.toList ks
+
+fastStringCodeLen :: Model -> Int
+fastStringCodeLen (Model _ n ks)
+  | n <= 1 = 0
+  | otherwise = ceiling $ log2e * (logFactorial n - V.sum (V.map logFactorial ks))
+
+-- | Code length in bits of the serialization of the model + a sampled
+-- symbol string
+codeLen :: Model -> Int
+codeLen mdl = modelCodeLen mdl + stringCodeLen mdl
 
 -- | logBase 2 e, for [nats] * log2e = [bits]
 log2e :: Double
