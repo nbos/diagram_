@@ -1,5 +1,5 @@
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RankNTypes, TupleSections #-}
+{-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
 -- | Construction rules
 module Diagram.Rules (module Diagram.Rules) where
 
@@ -9,9 +9,13 @@ import Control.Exception (assert)
 import Control.Monad
 
 import Data.Word (Word8)
+import Data.Maybe
 import Data.Tuple.Extra
+import qualified Data.List as L
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
 
 import qualified Data.Vector as B
 import qualified Data.Vector.Unboxed as U
@@ -109,6 +113,33 @@ suffixes rs = go
          | otherwise = let (_,s1) = rs V.! (s - 256)
                        in s : go s1
 
+-- | "Left-reciprocal" of a symbol is the string of symbols after a
+-- second symbol is removed from the right. The second symbol must be a
+-- member of the suffixes of the first as specified by the `suffixes`
+-- function. The extension of the subtracted symbol prepended by the
+-- returned string is equal to the extension of the first given symbol.
+lRecip :: Rules -> Int -> Int -> [Int]
+lRecip rs s01 s1 = go s01
+  where
+    go s | s == s1 = []
+         | Just (l,r) <- rs !? s = l:go r
+         | otherwise = error $ "bad arguments: "
+                       ++ show (s01, s1, suffixes rs s01)
+
+-- | "Right-reciprocal" of a symbol is the string of symbols after
+-- another symbol is removed from the left. The second symbol must be a
+-- member of the prefixes of the first as specified by the `prefixes`
+-- functions. The extension of the returned string prepended by the
+-- subtracted symbol is equal to the extension of the first given
+-- symbol.
+rRecip :: Rules -> Int -> Int -> [Int]
+rRecip rs s01 s0 = go [] s01
+  where
+    go acc s | s == s0 = acc
+             | Just (l,r) <- rs !? s = go (r:acc) l
+             | otherwise = error $ "bad arguments: "
+                           ++ show (s01, s0, prefixes rs s01)
+
 -- | Resolve the symbol back into a string of chars
 toString :: Rules -> [Int] -> String
 toString = UTF8.toString
@@ -127,11 +158,47 @@ toEscapedString = concatMap escapeChar .: toString
     escapeChar '\'' = "\\'"    -- Replace single quote with \'
     escapeChar c    = [c]      -- Leave other characters unchanged
 
+type FwdRules = Map (Int,Int) Int
+
+subst :: Rules -> [Int] -> [Int]
+subst rs = subst_ rs rsm []
+  where rsm = toMap rs
+
+-- | Given a rule set (forward) and a reversed list of previous symbols
+-- (closest first) and a forward list of following symbols, return the
+-- full list in forward order with all possible constructions made
+subst_ :: Rules -> FwdRules -> [Int] -> [Int] -> [Int]
+subst_ rs rsm = go
+  where
+    go !bwd [] = reverse bwd
+    go !bwd (s0:fwd) = go (reduce s0 bwd) fwd
+
+    reduce s1 [] = [s1]
+    reduce s1 (s0:bwd)
+      | null constrs = s1:s0:bwd
+      | otherwise = let s01 = minimum constrs
+                        recip01 = lRecip rs s0 s01
+                    in s01 : L.foldl' (flip reduce) recip01 bwd
+      where
+        constrs = catMaybes $
+                  -- check for a construction between s0 and s1, and
+                  (M.lookup (s0,s1) rsm :) $
+                  -- check for a construction overriding one in s0...
+                  fmap (\suf0 -> do let (_,r0) = rs ! suf0
+                                    s01 <- M.lookup (r0,s1) rsm
+                                    nothingIf (>= suf0) s01) $
+                  -- ...over composite suffixes of s0
+                  init $ suffixes rs s0
+
 --------------
 -- INDEXING --
 --------------
 
--- | Generic for `asFsts` and `asSnds`
+-- | Switch from an inverse to forward indexing of the construction
+-- rules
+toMap :: Rules -> FwdRules
+toMap = M.fromList . flip zip [256..] . V.toList
+
 asGen :: ((Int,Int) -> Int) -> Rules -> B.Vector [Int]
 asGen f rs = V.create $ do
   mv <- MV.replicate (numSymbols rs) []
