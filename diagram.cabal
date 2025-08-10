@@ -86,7 +86,9 @@ executable diagram
                     , exceptions
                     , bytestring
                     , utf8-string
+                    , bytestring-trie
                     , exact-combinatorics
+                    , streaming-bytestring
                     , unordered-containers
                     , terminal-progress-bar
                     , math-functions

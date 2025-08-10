@@ -1,4 +1,4 @@
-{-# LANGUAGE RankNTypes, TupleSections #-}
+{-# LANGUAGE RankNTypes, TupleSections, LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
 -- | Construction rules
 module Diagram.Rules (module Diagram.Rules) where
@@ -16,11 +16,16 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import Data.Trie (Trie)
+import qualified Data.Trie as Trie
 
 import qualified Data.Vector as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
+
+import Streaming
+import qualified Streaming.Prelude as S
 
 import Numeric.SpecFunctions (logFactorial)
 
@@ -89,7 +94,7 @@ invLookup rs s | s < 256   = Nothing
 extension :: Rules -> Int -> [Word8]
 extension rs = go
   where
-    go s | s < 256 = [fromIntegral s]
+    go s | s < 256 = [toEnum s]
          | otherwise = let (s0,s1) = rs V.! (s - 256)
                        in go s0 ++ go s1
 
@@ -168,17 +173,18 @@ subst rs = subst_ rs rsm []
 -- (closest first) and a forward list of following symbols, return the
 -- full list in forward order with all possible constructions made
 subst_ :: Rules -> FwdRules -> [Int] -> [Int] -> [Int]
-subst_ rs rsm = go
-  where
-    go !bwd [] = reverse bwd
-    go !bwd (s0:fwd) = go (reduce s0 bwd) fwd
+subst_ rs rsm = reverse .: L.foldl' (revReduce rs rsm)
 
-    reduce s1 [] = [s1]
-    reduce s1 (s0:bwd)
+revReduce :: Rules -> FwdRules -> [Int] -> Int -> [Int]
+revReduce rs rsm = go
+  where
+    go [] s1 = [s1]
+    go (s0:bwd) s1
       | null constrs = s1:s0:bwd
       | otherwise = let s01 = minimum constrs
                         recip01 = lRecip rs s0 s01
-                    in s01 : L.foldl' (flip reduce) recip01 bwd
+                        bwd' = L.foldl' go bwd recip01
+                    in go bwd' s01
       where
         constrs = catMaybes $
                   -- check for a construction between s0 and s1, and
@@ -189,6 +195,53 @@ subst_ rs rsm = go
                                     nothingIf (>= suf0) s01) $
                   -- ...over composite suffixes of s0
                   init $ suffixes rs s0
+
+
+-- | Take exactly `n` fully constructed symbols from a stream of
+-- potentially unconstructed or partially constructed symbols, returning
+-- a stream equal in extension to the remainder but with its head
+-- possibly partially constructed. Makes it possible to iteratively
+-- consume a stream in chunks of given sizes.
+splitAtSubst :: Monad m => Rules -> FwdRules -> Trie () ->
+                Int -> Stream (Of Int) m r ->
+                Stream (Of Int) m (Stream (Of Int) m r)
+splitAtSubst rs rsm trie = go []
+  where
+    yieldUntilPrefixing fwd
+      | (hd:tl) <- fwd
+      , null keys || keys == [key] = S.yield hd >>
+                                     yieldUntilPrefixing tl
+      | otherwise = return fwd -- :: extension of fwd is a prefix
+      where
+        key = BS.pack $ concatMap (extension rs) fwd
+        keys = Trie.keys $ Trie.submap key trie
+
+    go bwd n src = (lift (S.next src) >>=) $ \case
+      Left r -> let (ss,rest) = splitAt n $ reverse bwd
+                in S.each ss >>
+                   return (S.each rest >> return r)
+      Right (s,src') -> do
+        (m,rest) <- withLength $ S.splitAt n $ -- yield at most `n`
+                    yieldUntilPrefixing $ reverse bwd'
+        extra :> fwd' <- lift $ S.toList rest
+        if not (null extra) then return $ S.each extra >>
+                                 S.each fwd' >> src' -- done
+          else go (reverse fwd') (n - m) src'
+
+        where bwd' = revReduce rs rsm bwd s
+
+-- Count yielded elements while preserving the stream,
+-- and at the end return (count, r)
+withLength :: Monad m => Stream (Of a) m r -> Stream (Of a) m (Int, r)
+withLength = go 0
+  where
+    go !n str = do
+      step <- lift (S.next str)
+      case step of
+        Left r -> return (n, r)
+        Right (a, rest) -> do
+          S.yield a
+          go (n + 1) rest
 
 --------------
 -- INDEXING --

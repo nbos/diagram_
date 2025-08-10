@@ -81,7 +81,7 @@ main = do
             let (s01, mdl'@(Model _ n' _)) = Mdl.push mdl (s0,s1) n01
 
             ss' <- pbSeq n' (here "Rewriting string") $
-                   subst (s0,s1) s01 ss
+                   subst1 (s0,s1) s01 ss
 
             pb2 <- newPB n' (here "Updating counts")
             (am,rm,()) <- recountM (s0,s1) s01 $
@@ -131,19 +131,20 @@ main = do
       ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
       ++ show (s0,s1)
 
--- | Substitute a pair of symbols for a constructed joint symbol in a
--- string of symbols
-subst :: (Int,Int) -> Int -> [Int] -> [Int]
-subst (s0,s1) s01 = go
+-- | Substitute a single pair of symbols for a constructed joint symbol
+-- in a string of symbols
+subst1 :: (Int,Int) -> Int -> [Int] -> [Int]
+subst1 (s0,s1) s01 = go
   where
     go [] = []
     go [s] = [s]
     go (s:s':ss) | s == s0 && s' == s1 = s01:go ss
                  | otherwise = s:go (s':ss)
 
-substM :: forall m r. Monad m => (Int, Int) -> Int ->
+-- | Monadic single construction rule substitution using Streams
+subst1M :: forall m r. Monad m => (Int, Int) -> Int ->
           Stream (Of Int) m r -> Stream (Of Int) m r
-substM (s0,s1) s01 = go
+subst1M (s0,s1) s01 = go
   where
     go :: Stream (Of Int) m r -> Stream (Of Int) m r
     go ss = (lift (S.next ss) >>=) $ \case
@@ -158,6 +159,7 @@ substM (s0,s1) s01 = go
             | otherwise -> S.yield s0 >> goCons s' ss'
       | otherwise = S.yield s >> go ss
 
+-- | Single construction rule substitution on a Vector representation
 substV :: PrimMonad m => (Int, Int) -> Int -> U.MVector (PrimState m) Int ->
           m Int
 substV (s0,s1) s01 mv = go 0 0
