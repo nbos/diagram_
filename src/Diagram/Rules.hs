@@ -161,6 +161,7 @@ toEscapedString = concatMap escapeChar .: toString
     escapeChar '\\' = "\\\\"   -- Replace backslash with \\
     escapeChar '\"' = "\\\""   -- Replace double quote with \"
     escapeChar '\'' = "\\'"    -- Replace single quote with \'
+    escapeChar ',' = "\\,"     -- for CSV
     escapeChar c    = [c]      -- Leave other characters unchanged
 
 type FwdRules = Map (Int,Int) Int

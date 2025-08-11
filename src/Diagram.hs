@@ -3,6 +3,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
 
+import System.IO (openFile, IOMode(..), hPutStrLn, hFlush, hClose)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeBaseName)
 import System.Environment (getArgs)
 import System.Exit
 
@@ -11,6 +14,7 @@ import Control.Monad.Primitive
 import Control.Exception (evaluate)
 
 import Text.Printf
+import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -48,6 +52,12 @@ main = do
                  S.mapM (\s -> incPB pb0 >> return s) $
                  S.each ss0
 
+      createDirectoryIfMissing True "data"
+      currentTime <- getCurrentTime
+      let timestamp = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" currentTime
+          logFilePath = "data/" ++ takeBaseName filename ++ "-run-" ++ timestamp ++ ".csv"
+      csvHandle <- openFile logFilePath WriteMode
+
       let go mdl@(Model rs _ _) ss !m = do
             let mdlLen = Mdl.modelCodeLen mdl
                 ssLen = Mdl.fastStringCodeLen mdl
@@ -57,7 +67,7 @@ main = do
                 factor = 1/ratio
 
             putStrLn $ here $ "Computed code length: " ++
-              printf "%d (%d + %d), %.2f%% of orig., factor: %f"
+              printf "%d (%d + %d), %.2f%% of orig., factor: %.4f"
               codeLen mdlLen ssLen (ratio * 100) factor
 
             pb1 <- newPB (M.size m) $ here "Computing losses"
@@ -75,7 +85,16 @@ main = do
                 forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
                 return c
 
+            hPutStrLn csvHandle $
+              printf "%d, %d, %d, %d, %f, %d, %d, %d, %f, \"%s\", \"%s\", \"%s\""
+              (R.numSymbols rs) codeLen mdlLen ssLen factor s0 s1 n01 loss
+              (R.toEscapedString rs [s0])
+              (R.toEscapedString rs [s1])
+              (R.toEscapedString rs [s0,s1])
+            hFlush csvHandle
+
             when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.") >>
+                              hClose csvHandle >>
                               exitSuccess )
 
             let (s01, mdl'@(Model _ n' _)) = Mdl.push mdl (s0,s1) n01
@@ -102,6 +121,15 @@ main = do
       putStrLn "Usage: program <filename>"
       exitFailure
   where
+    showCdt rs (loss,(s0,s1),n01) = "   "
+      ++ show loss ++ ": "
+      ++ showJoint rs s0 s1
+      ++ " (" ++ show n01 ++ ")"
+
+    showJoint rs s0 s1 = "\"" ++ R.toEscapedString rs [s0]
+      ++ "\" + \"" ++ R.toEscapedString rs [s1]
+      ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
+      ++ show (s0,s1)
 
     -- DEBUG --
     --       deltam = M.filter (uncurry (/=)) $ mergeMaps m' $
@@ -120,16 +148,6 @@ main = do
     --  (\_ v1 v2 -> Just (Just v1, Just v2))
     --  (M.mapMaybeWithKey (\_ v1 -> Just (Just v1, Nothing)))
     --  (M.mapMaybeWithKey (\_ v2 -> Just (Nothing, Just v2)))
-
-    showCdt rs (loss,(s0,s1),n01) = "   "
-      ++ show loss ++ ": "
-      ++ showJoint rs s0 s1
-      ++ " (" ++ show n01 ++ ")"
-
-    showJoint rs s0 s1 = "\"" ++ R.toEscapedString rs [s0]
-      ++ "\" + \"" ++ R.toEscapedString rs [s1]
-      ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
-      ++ show (s0,s1)
 
 -- | Substitute a single pair of symbols for a constructed joint symbol
 -- in a string of symbols
