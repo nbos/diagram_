@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
 
-import System.IO (openFile, IOMode(..), hPutStrLn, hFlush, hClose)
+import System.IO (openFile, IOMode(..), hFileSize, hPutStrLn, hFlush, hClose)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName)
 import System.Environment (getArgs)
@@ -11,15 +11,17 @@ import System.Exit
 
 import Control.Monad
 import Control.Monad.Primitive
-import Control.Exception (evaluate)
 
 import Text.Printf
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
+import Data.Maybe
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.IntMap.Strict as IM
 import qualified Data.ByteString as BS
+import Data.Trie (Trie)
+import qualified Data.Trie as Trie
 
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
@@ -28,6 +30,7 @@ import qualified Data.Vector.Strict as B
 import Streaming hiding (first,second)
 import qualified Streaming as S
 import qualified Streaming.Prelude as S
+import qualified Streaming.ByteString as Q
 
 import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
@@ -35,92 +38,117 @@ import qualified Diagram.Rules as R
 import Diagram.Progress
 import Diagram.Util hiding (ratio)
 
+data TrainState m = TrainState {
+  trainModel :: !Model, -- model fitted on trainBuffer
+  fwdRules :: !(Map (Int,Int) Int), -- (s0,s1) -> s01
+  extensionTrie :: !(Trie ()), -- extensions of all symbols
+  trainBuffer :: ![Int], -- constructed data
+  symbolSource :: !(Stream (Of Int) m ()), -- source for appending data
+  symbolCandidates :: !(Map (Int,Int) Int) -- (s0,s1) -> n01
+}
+
 main :: IO ()
 main = do
-  args <- getArgs
-  case args of
-    [filename] -> do
-      bytestring <- BS.readFile filename
-      let len = BS.length bytestring
-          codeLen0 = len * 8
-      putStrLn $ "Original size: " ++ show codeLen0 ++ " bits"
-      let as = BS.unpack bytestring
-          mdl0 = Mdl.fromAtoms as
-          ss0 = fromEnum <$> as
-      pb0 <- newPB len "Initializing joint counts"
-      (m0,()) <- countJointsM $
-                 S.mapM (\s -> incPB pb0 >> return s) $
-                 S.each ss0
+  (maxBufLen, filename) <- (getArgs >>=) $ \case
+    [filename] -> return (maxBound, filename)
+    [maxBufLenStr, filename] -> return (read maxBufLenStr, filename)
+    _else -> putStrLn "Usage: diagram [SIZE] FILENAME" >>
+             exitFailure
 
-      createDirectoryIfMissing True "data"
-      currentTime <- getCurrentTime
-      let timestamp = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" currentTime
-          logFilePath = "data/" ++ takeBaseName filename ++ "-run-" ++ timestamp ++ ".csv"
-      csvHandle <- openFile logFilePath WriteMode
+  srcHandle <- openFile filename ReadMode
+  srcSize <- hFileSize srcHandle
+  let codeLen0 = srcSize * 8 -- in bits
+      src0 = S.map fromEnum $ Q.unpack $ Q.fromHandle srcHandle
+  buf0 :> n0 :> src0' <- S.toList $ S.length $ S.copy $
+                         S.splitAt maxBufLen src0
+  let mdl0 = Mdl.addCounts Mdl.empty buf0
+  (cdts0,()) <- countJointsM $
+             withPB n0 "Initializing joint counts" $
+             S.each buf0
 
-      let go mdl@(Model rs _ _) ss !m = do
-            let mdlLen = Mdl.modelCodeLen mdl
-                ssLen = Mdl.fastStringCodeLen mdl
-                codeLen = mdlLen + ssLen
-                ratio = fromIntegral codeLen
-                        / fromIntegral codeLen0 :: Double
-                factor = 1/ratio
+  createDirectoryIfMissing True "data"
+  currentTime <- getCurrentTime
+  let timestamp = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" currentTime
+      logFilePath = "data/" ++ takeBaseName filename
+                    ++ "-run-" ++ timestamp ++ ".csv"
+  csvHandle <- openFile logFilePath WriteMode
 
-            putStrLn $ here $ "Computed code length: " ++
-              printf "%d (%d + %d), %.2f%% of orig., factor: %.4f"
-              codeLen mdlLen ssLen (ratio * 100) factor
+  let go (TrainState mdl@(Model rs n _) rsm trie buf src cdts) = do
+        let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
+            mdlLen = Mdl.modelCodeLen mdl
+            bufCodeLen = Mdl.fastStringCodeLen mdl
+            codeLen = mdlLen + bufCodeLen
+            ratio = fromIntegral codeLen
+                    / fromIntegral codeLen0 :: Double
+            factor = recip ratio
 
-            pb1 <- newPB (M.size m) $ here "Computing losses"
-            cdts <- forM (M.toList m) $ \(s0s1,n01) -> do
-                      loss <- evaluate $ Mdl.infoDelta mdl s0s1 n01
-                      incPB pb1
-                      return (loss, s0s1, n01)
+        putStrLn $ here $ "Computed code length: " ++
+          printf "%d (%d + %d), %.2f%% of orig., factor: %.4f"
+          codeLen mdlLen bufCodeLen (ratio * 100) factor
 
-            putStrLn $ here "Sorting candidates..."
-            (loss,(s0,s1),n01) <- case L.sort cdts of
-              [] -> error "no candidates"
-              (c@(loss,(s0,s1),_):cdts') -> do
-                when (loss < 0) $ putStrLn $ here $ "Intro: " ++ showJoint rs s0 s1
-                putStrLn $ here "Top candidates:"
-                forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
-                return c
+        cdtList <- pbSeq (M.size cdts) (here "Computing losses") $
+                   (<$> M.toList cdts) $ \(s0s1,n01) ->
+          let loss = Mdl.infoDelta mdl s0s1 n01
+          in loss `seq` (loss, s0s1, n01)
 
-            hPutStrLn csvHandle $
-              printf "%d, %d, %d, %d, %f, %d, %d, %d, %f, \"%s\", \"%s\", \"%s\""
-              (R.numSymbols rs) codeLen mdlLen ssLen factor s0 s1 n01 loss
-              (R.toEscapedString rs [s0])
-              (R.toEscapedString rs [s1])
-              (R.toEscapedString rs [s0,s1])
-            hFlush csvHandle
+        putStrLn $ here "Sorting candidates..."
+        (loss,(s0,s1),n01) <- case L.sort cdtList of
+          [] -> error "no candidates"
+          (c@(loss,(s0,s1),_):cdts') -> do
+            when (loss < 0) $ putStrLn $ here $
+                              "Intro: " ++ showJoint rs s0 s1
+            putStrLn $ here "Top candidates:"
+            forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
+            return c
 
-            when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.") >>
-                              hClose csvHandle >>
-                              exitSuccess )
+        hPutStrLn csvHandle $
+          printf "%d, %d, %d, %d, %f, %d, %d, %d, %f, \"%s\", \"%s\", \"%s\""
+          (R.numSymbols rs) codeLen mdlLen bufCodeLen factor s0 s1 n01 loss
+          (R.toEscapedString rs [s0])
+          (R.toEscapedString rs [s1])
+          (R.toEscapedString rs [s0,s1])
+        hFlush csvHandle
 
-            let (s01, mdl'@(Model _ n' _)) = Mdl.push mdl (s0,s1) n01
+        when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.") >>
+                          hClose csvHandle >>
+                          exitSuccess )
 
-            ss' <- pbSeq n' (here "Rewriting string") $
-                   subst1 (s0,s1) s01 ss
+        let (s01, mdl'@(Model rs' n' _)) = Mdl.pushRule mdl (s0,s1) n01
+            rsm' = M.insert (s0,s1) s01 rsm
+            bs01 = BS.pack $ R.extension rs' s01
+            trie' = Trie.insert bs01 () trie
 
-            pb2 <- newPB n' (here "Updating counts")
-            (am,rm,()) <- recountM (s0,s1) s01 $
-                          S.mapM (\s -> incPB pb2 >> return s) $
-                          S.each ss'
-            putStrLn ""
-            go mdl' ss' $
-              M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id am $
-              M.differenceWith (nothingIf (== 0) .: (-)) m rm
-              where
-                here :: String -> String
-                here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
+        buf' <- pbSeq n' (here "Rewriting string") $
+                subst1 (s0,s1) s01 buf
 
+        (am,rm,sn') <- recountM (s0,s1) s01 $ -- count maps (am,rm)
+                       withPB n' (here "Updating counts") $
+                       fmap (fromMaybe (error "empty buf") -- Maybe a -> a
+                              . S.fst') $ -- drop ()
+                       S.last $ S.copy $ -- last symbol :: Maybe a
+                       S.each buf'
 
-      go mdl0 ss0 m0
+        ss :> src' <- S.toList $
+                      R.splitAtSubst rs rsm trie (n - n') src
 
-    _else -> do
-      putStrLn "Usage: program <filename>"
-      exitFailure
+        let mdl'' = Mdl.addCounts mdl' ss
+            buf'' = buf' ++ ss
+            cdts' = (countJoints_ cdts sn' ss `sub` rm) `add` am
+
+        putStrLn ""
+        go $ TrainState mdl'' rsm' trie' buf'' src' cdts'
+
+  go $ TrainState mdl0 M.empty Trie.empty buf0 src0' cdts0
+
   where
+    -- | O(log(n)) equiv. of M.filter (> 0) .: M.unionWith (+)
+    add :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
+    add = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id
+
+    -- | O(log(n) equiv. of M.filter (> 0) .: M.unionWith (-)
+    sub :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
+    sub = M.differenceWith (nothingIf (== 0) .: (-))
+
     showCdt rs (loss,(s0,s1),n01) = "   "
       ++ show loss ++ ": "
       ++ showJoint rs s0 s1
@@ -289,16 +317,18 @@ recountM (s0,s1) s01 str0 = do
     readPrimRef = flip MV.read 0 -- TODO: unsafe
 
 countJoints :: [Int] -> Map (Int,Int) Int
-countJoints = go M.empty -- fst . runIdentity . countJointsM . S.each
-  where
-    go !m [] = m
-    go !m [_] = m
-    go !m [s0,s1] = M.insertWith (+) (s0,s1) 1 m
-    go !m (s0:s1:s2:ss)
-      | s0 == s1 && s1 == s2 = go m' (s2:ss)
-      | otherwise = go m' (s1:s2:ss)
-      where
-        m' = M.insertWith (+) (s0,s1) 1 m
+countJoints [] = M.empty
+countJoints (s0:ss) = countJoints_ M.empty s0 ss
+
+-- | Count the joints in a list given the map of counts and the previous
+-- symbol
+countJoints_ :: Map (Int,Int) Int -> Int -> [Int] -> Map (Int,Int) Int
+countJoints_ !m _ [] = m
+countJoints_ !m s0 [s1] = M.insertWith (+) (s0,s1) 1 m
+countJoints_ !m s0 (s1:s2:ss)
+  | s0 == s1 && s1 == s2 = countJoints_ m' s2 ss
+  | otherwise = countJoints_ m' s1 (s2:ss)
+  where m' = M.insertWith (+) (s0,s1) 1 m
 
 countJointsM :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
 countJointsM = go M.empty

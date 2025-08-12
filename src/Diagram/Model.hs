@@ -30,17 +30,31 @@ data Model = Model {
   modelCounts :: !(U.Vector Int)
 } deriving Show
 
+empty :: Model
+empty = Model R.empty 0 $ U.replicate 256 0
+
 -- | Initial construction from string of atoms
 fromAtoms :: [Word8] -> Model
 fromAtoms as = runST $ do
   nref <- newSTRef 0
-  mutns <- MV.replicate 256 0
+  mutks <- MV.replicate 256 0
   forM_ as $ \a -> do
     modifySTRef' nref (+1)
-    MV.modify mutns (+1) $ fromIntegral a
+    MV.modify mutks (+1) $ fromIntegral a
   n <- readSTRef nref
-  ks <- V.unsafeFreeze mutns
+  ks <- V.unsafeFreeze mutks
   return $ Model R.empty n ks
+
+addCounts :: Model -> [Int] -> Model
+addCounts (Model rs n ks) ss = runST $ do
+  nref <- newSTRef n
+  mutks <- V.thaw ks
+  forM_ ss $ \s -> do
+    modifySTRef' nref (+1)
+    MV.modify mutks (+1) s
+  n' <- readSTRef nref
+  ks' <- V.unsafeFreeze mutks
+  return $ Model rs n' ks'
 
 -- | Reconstruction from rule set and symbol string
 fromSymbols :: Rules -> [Int] -> Model
@@ -51,10 +65,10 @@ fromSymbols rs ss = Model rs n ks
     ks = V.replicate (R.numSymbols rs) 0
          V.// IM.toList im -- write
 
-push :: Model -> (Int,Int) -> Int -> (Int, Model)
-push (Model rs n ks) (s0,s1) n01 = (s01, Model rs' n' ks')
+pushRule :: Model -> (Int,Int) -> Int -> (Int, Model)
+pushRule (Model rs n ks) (s0,s1) n01 = (s01, Model rs' n' ks')
   where
-    (s01,rs') = R.push (s0,s1) rs
+    (s01,rs') = R.pushRule (s0,s1) rs
     n' = n - n01
     ks' = runST $ do
       mutks <- V.unsafeThaw $ V.snoc ks n01
@@ -86,7 +100,7 @@ decode bv = do
 -- | Code length in bits of the serialization of the model
 modelCodeLen :: Model -> Int
 modelCodeLen (Model rs n _) = rsCodeLen + nCodeLen
-                               + fromIntegral ksCodeLen
+                              + fromIntegral ksCodeLen
   where
     rsCodeLen = R.codeLen rs
     nCodeLen = BV.length $ Elias.encodeDelta $ fromIntegral n

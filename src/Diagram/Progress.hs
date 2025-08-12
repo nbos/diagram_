@@ -3,25 +3,31 @@ module Diagram.Progress (module Diagram.Progress) where
 
 import qualified Data.Text.Lazy as Text
 import System.ProgressBar
+import Streaming
 import qualified Streaming.Prelude as S
 
 -- | Evaluate to WHNF each element of the list and log the progress with
 -- a ProgressBar given the length of the list and a label
 pbSeq :: Int -> String -> [a] -> IO [a]
-pbSeq n str as = do
-  pb <- newPB n str
+pbSeq n message as = do
+  pb <- newPB n message
   S.toList_ $
-    S.mapM (\a -> incPB pb >> return a) $
+    S.mapM (\a -> incPB pb >> return a) $ -- streaming does Seq
     S.each as
 
 -- | Evaluate to WHNF each element of the list and log the progress with
 -- a ProgressBar without knowing the length of the list given a label
 pbSeq' :: String -> [a] -> IO [a]
-pbSeq' str as = do
-  pb <- newPB' str
+pbSeq' message as = do
+  pb <- newPB' message
   S.toList_ $
     S.mapM (\a -> incPB pb >> return a) $
     S.each as
+
+withPB :: MonadIO m => Int -> String -> Stream (Of a) m r -> Stream (Of a) m r
+withPB n message str = do
+  pb <- lift $ liftIO $ newPB n message
+  S.mapM (\a -> liftIO (incPB pb) >> return a) str
 
 -- | Increment ProgressBar by 1
 incPB :: ProgressBar s -> IO ()

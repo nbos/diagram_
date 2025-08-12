@@ -1,5 +1,5 @@
-{-# LANGUAGE RankNTypes, TupleSections, LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables, RankNTypes #-}
+{-# LANGUAGE LambdaCase #-}
 -- | Construction rules
 module Diagram.Rules (module Diagram.Rules) where
 
@@ -65,13 +65,11 @@ fromList = V.fromList
 
 -- | Add a new symbol with a construction rule. Returns updated rules
 -- and index of new symbol. O(n)
-push :: (Int, Int) -> Rules -> (Int, Rules)
-push s0s1 rs =
+pushRule :: (Int, Int) -> Rules -> (Int, Rules)
+pushRule s0s1 rs =
   assert (uncurry (&&) $ both (< s01) s0s1)
-  (s01, irs')
-  where
-    s01 = numSymbols rs
-    irs' = V.snoc rs s0s1
+  (s01, V.snoc rs s0s1)
+  where s01 = numSymbols rs
 
 -- | Lookup the rule for constructing a given symbol
 (!) :: Rules -> Int -> (Int,Int)
@@ -164,7 +162,7 @@ toEscapedString = concatMap escapeChar .: toString
     escapeChar ',' = "\\,"     -- for CSV
     escapeChar c    = [c]      -- Leave other characters unchanged
 
-type FwdRules = Map (Int,Int) Int
+type FwdRules = Map (Int,Int) Int -- (s0,s1) -> s01
 
 subst :: Rules -> [Int] -> [Int]
 subst rs = subst_ rs rsm []
@@ -197,7 +195,6 @@ revReduce rs rsm = go
                   -- ...over composite suffixes of s0
                   init $ suffixes rs s0
 
-
 -- | Take exactly `n` fully constructed symbols from a stream of
 -- potentially unconstructed or partially constructed symbols, returning
 -- a stream equal in extension to the remainder but with its head
@@ -222,27 +219,13 @@ splitAtSubst rs rsm trie = go []
                 in S.each ss >>
                    return (S.each rest >> return r)
       Right (s,src') -> do
-        (m,rest) <- withLength $ S.splitAt n $ -- yield at most `n`
-                    yieldUntilPrefixing $ reverse bwd'
+        let bwd' = revReduce rs rsm bwd s
+        m :> rest <- S.length $ S.copy $ S.splitAt n $ -- yield at most `n`
+                     yieldUntilPrefixing $ reverse bwd'
         extra :> fwd' <- lift $ S.toList rest
         if not (null extra) then return $ S.each extra >>
                                  S.each fwd' >> src' -- done
           else go (reverse fwd') (n - m) src'
-
-        where bwd' = revReduce rs rsm bwd s
-
--- Count yielded elements while preserving the stream,
--- and at the end return (count, r)
-withLength :: Monad m => Stream (Of a) m r -> Stream (Of a) m (Int, r)
-withLength = go 0
-  where
-    go !n str = do
-      step <- lift (S.next str)
-      case step of
-        Left r -> return (n, r)
-        Right (a, rest) -> do
-          S.yield a
-          go (n + 1) rest
 
 --------------
 -- INDEXING --
