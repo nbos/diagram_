@@ -37,9 +37,13 @@ incPB pb = incProgress pb 1
 newPB :: Int -> String -> IO (ProgressBar ())
 newPB n message = newProgressBar style 10 (Progress 0 n ())
   where
+    width = 70 -- modify if using a smaller window
+    nLen = length $ show n
+    exactLen = 2*nLen + 1
+    message' = padOrTruncate (width - exactLen) message
     style = defStyle{
-      stylePrefix = msg (Text.pack message <> " ") <> exact,
-      stylePostfix = percentage <> msg "% ETA: "
+      stylePrefix = msg (Text.pack message' <> " ") <> exact,
+      stylePostfix = percentage <> msg " ETA: "
                      <> remainingTime renderDuration "00"
                      <> msg " DUR: " <> elapsedTime renderDuration,
       styleDone = '#',
@@ -53,7 +57,7 @@ newPB' message = newProgressBar style 10 (Progress 0 (2^(28::Int)) ())
   where
     style = defStyle{
       stylePrefix = msg (Text.pack message <> " ") <> customExact,
-      stylePostfix = customPercentage <> msg "% ETA: "
+      stylePostfix = customPercentage <> msg " ETA: "
                      <> customETA
                      <> msg " DUR: " <> elapsedTime renderDuration,
       styleDone = '#',
@@ -65,3 +69,11 @@ newPB' message = newProgressBar style 10 (Progress 0 (2^(28::Int)) ())
     
     customPercentage = Label $ \_ _ -> "??"
     customETA = Label $ \_ _ -> "∞"
+
+padOrTruncate :: Int -> String -> String
+padOrTruncate width str
+    | len == width = str
+    | len <  width = str ++ replicate (width - len) ' '
+    | width <= 3   = take width (replicate width '.')
+    | otherwise    = take (width - 3) str ++ "..."
+  where len = length str
