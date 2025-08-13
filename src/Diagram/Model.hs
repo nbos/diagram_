@@ -152,10 +152,26 @@ information (Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
     ssInfo = log2e * ( logFactorial n
                        - V.sum (logFactorial `V.map` ks))
 
--- | Compute the change in information of the model + sampled symbol
--- string given a new rule
+scaleInt :: Double -> Int -> Int
+scaleInt scale = round . (scale*) . fromIntegral
+
+-- | `information` if the model's size `n` was scaled by `scale`,
+-- e.g. the rule set takes the same size, but the symbol distribution
+-- and permutation scale
+scaledInformation :: Double -> Model -> Double
+scaledInformation scale (Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
+  where
+    rsInfo = R.information rs
+    sn = scaleInt scale n
+    nInfo = eliasInfo sn
+    ksInfo = distrInfo sn (V.length ks)
+    ssInfo = log2e * ( logFactorial sn
+                       - V.sum ((logFactorial . scaleInt scale) `V.map` ks))
+
+-- | Compute the change in code length (bits) of the model + symbol
+-- string matching it given a new rule introduction
 infoDelta :: Model -> (Int,Int) -> Int -> Double
-infoDelta (Model rs n ks) (s0,s1) n01 =
+infoDelta (Model rs n ks) (s0,s1) k01 =
   -- traceShow (R.toString rs [s0,s1]) $
   -- traceShow [rsInfoDelta,nInfoDelta,ksInfoDelta,ssInfoDelta] $
   rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
@@ -164,7 +180,7 @@ infoDelta (Model rs n ks) (s0,s1) n01 =
     rsInfoDelta = R.fwdInfoDelta rs
 
     -- n elias encoding
-    n' = n - n01
+    n' = n - k01
     nInfoDelta = eliasInfo n' - eliasInfo n
 
     -- ks a distribution of n elements
@@ -174,11 +190,43 @@ infoDelta (Model rs n ks) (s0,s1) n01 =
     -- ss a multiset permutation of counts ks
     ssInfoDelta
       | s0 == s1 = log2e * ( logFactorial n' - logFactorial n
-                             - logFactorial (n0 - 2*n01) + logFactorial n0
-                             - logFactorial n01 )
+                             - logFactorial (k0 - 2*k01) + logFactorial k0
+                             - logFactorial k01 )
       | otherwise = log2e * ( logFactorial n' - logFactorial n
-                             - logFactorial (n0 - n01) + logFactorial n0
-                             - logFactorial (n1 - n01) + logFactorial n1
-                             - logFactorial n01 )
-    n0 = ks V.! s0
-    n1 = ks V.! s1
+                             - logFactorial (k0 - k01) + logFactorial k0
+                             - logFactorial (k1 - k01) + logFactorial k1
+                             - logFactorial k01 )
+    k0 = ks V.! s0
+    k1 = ks V.! s1
+
+-- | `infoDelta` if the model's size `n` was scaled by `scale`
+scaledInfoDelta :: Double -> Model -> (Int,Int) -> Int -> Double
+scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
+  rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+  where
+    sn = scaleInt scale n
+    sk01 = scaleInt scale k01
+
+    -- rules info delta (constant)
+    rsInfoDelta = R.fwdInfoDelta rs
+
+    -- n elias encoding
+    sn' = sn - sk01
+    nInfoDelta = eliasInfo sn' - eliasInfo sn
+
+    -- ks a distribution of n elements
+    ksInfoDelta = distrInfo sn' (V.length ks + 1) -- new
+                  - distrInfo sn (V.length ks) -- old
+
+    -- ss a multiset permutation of counts ks
+    ssInfoDelta
+      | s0 == s1 = log2e * ( logFactorial sn' - logFactorial sn
+                             - logFactorial (sk0 - 2*sk01) + logFactorial sk0
+                             - logFactorial sk01 )
+      | otherwise = log2e * ( logFactorial sn' - logFactorial sn
+                             - logFactorial (sk0 - sk01) + logFactorial sk0
+                             - logFactorial (sk1 - sk01) + logFactorial sk1
+                             - logFactorial sk01 )
+
+    sk0 = scaleInt scale $ ks V.! s0
+    sk1 = scaleInt scale $ ks V.! s1
