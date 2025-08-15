@@ -23,6 +23,7 @@ import qualified Data.ByteString as BS
 import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 
+import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 import qualified Data.Vector.Strict as B
@@ -44,7 +45,9 @@ data TrainState m = TrainState {
   extensionTrie :: !(Trie ()), -- extensions of all symbols
   trainBuffer :: ![Int], -- constructed data
   symbolSource :: !(Stream (Of Int) m ()), -- source for appending data
-  symbolCandidates :: !(Map (Int,Int) Int) -- (s0,s1) -> n01
+  symbolCandidates :: !(Map (Int,Int) Int), -- (s0,s1) -> n01
+  bufExtLength :: !Int,
+  symbolLengths :: !(U.Vector Int) -- atomic length of symbol's extensions
 }
 
 main :: IO ()
@@ -56,15 +59,8 @@ main = do
              exitFailure
 
   srcHandle <- openFile filename ReadMode
-  srcSize <- hFileSize srcHandle
-  let codeLen0 = srcSize * 8 -- in bits
-      src0 = S.map fromEnum $ Q.unpack $ Q.fromHandle srcHandle
-  buf0 :> n0 :> src0' <- S.toList $ S.length $ S.copy $
-                         S.splitAt maxBufLen src0
-  let mdl0 = Mdl.addCounts Mdl.empty buf0
-  (cdts0,()) <- countJointsM $
-             withPB n0 "Initializing joint counts" $
-             S.each buf0
+  srcLen <- hFileSize srcHandle -- number of atoms in the source
+  let origCodeLen = srcLen * 8 -- in bits
 
   createDirectoryIfMissing True "data"
   currentTime <- getCurrentTime
@@ -73,22 +69,27 @@ main = do
                     ++ "-run-" ++ timestamp ++ ".csv"
   csvHandle <- openFile logFilePath WriteMode
 
-  let go (TrainState mdl@(Model rs n _) rsm trie buf src cdts) = do
+  let go (TrainState mdl@(Model rs n _) rsm trie buf src cdts bel sls) = do
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
-            mdlLen = Mdl.modelCodeLen mdl
+
+            mdlCodeLen = Mdl.modelCodeLen mdl
             bufCodeLen = Mdl.fastStringCodeLen mdl
-            codeLen = mdlLen + bufCodeLen
-            ratio = fromIntegral codeLen
-                    / fromIntegral codeLen0 :: Double
+            scale = fromIntegral srcLen / fromIntegral bel
+            approxSrcCodeLen = Mdl.scaleInt scale bufCodeLen
+            approxTotalCodeLen = mdlCodeLen + approxSrcCodeLen
+
+            ratio = fromIntegral approxTotalCodeLen
+                    / fromIntegral origCodeLen :: Double
             factor = recip ratio
 
-        putStrLn $ here $ "Computed code length: " ++
-          printf "%d (%d + %d), %.2f%% of orig., factor: %.4f"
-          codeLen mdlLen bufCodeLen (ratio * 100) factor
+        putStrLn $ here $ "Length (bits): " ++
+          printf "%d (%d + %d (%.1f × %d)), %.2f%% of orig., factor: %.4f"
+          approxTotalCodeLen mdlCodeLen approxSrcCodeLen scale bufCodeLen
+          (ratio * 100) factor
 
         cdtList <- pbSeq (M.size cdts) (here "Computing losses") $
                    (<$> M.toList cdts) $ \(s0s1,n01) ->
-          let loss = Mdl.infoDelta mdl s0s1 n01
+          let loss = Mdl.scaledInfoDelta scale mdl s0s1 n01
           in loss `seq` (loss, s0s1, n01)
 
         putStrLn $ here "Sorting candidates..."
@@ -103,7 +104,8 @@ main = do
 
         hPutStrLn csvHandle $
           printf "%d, %d, %d, %d, %f, %d, %d, %d, %f, \"%s\", \"%s\", \"%s\""
-          (R.numSymbols rs) codeLen mdlLen bufCodeLen factor s0 s1 n01 loss
+          (R.numSymbols rs) approxTotalCodeLen mdlCodeLen approxSrcCodeLen factor
+          s0 s1 n01 loss
           (R.toEscapedString rs [s0])
           (R.toEscapedString rs [s1])
           (R.toEscapedString rs [s0,s1])
@@ -128,17 +130,34 @@ main = do
                        S.last $ S.copy $ -- last symbol :: Maybe a
                        S.each buf'
 
+        -- extend the buffer
         ss :> src' <- S.toList $
-                      R.splitAtSubst rs rsm trie (n - n') src
+                      R.splitAtSubst rs' rsm' trie' (n - n') src
 
+        -- refine state with new symbols
         let mdl'' = Mdl.addCounts mdl' ss
-            buf'' = buf' ++ ss
+            buf'' | null ss = buf'
+                  | otherwise = buf' ++ ss
             cdts' = (countJoints_ cdts sn' ss `sub` rm) `add` am
+            bel' = bel + sum ((sls' V.!) <$> ss)
+            sls' = V.snoc sls (sls V.! s0 + sls V.! s1)
 
         putStrLn ""
-        go $ TrainState mdl'' rsm' trie' buf'' src' cdts'
+        go $ TrainState mdl'' rsm' trie' buf'' src' cdts' bel' sls'
 
-  go $ TrainState mdl0 M.empty Trie.empty buf0 src0' cdts0
+
+      src0 = S.map fromEnum $ Q.unpack $ Q.fromHandle srcHandle
+
+  buf0 :> n0 :> src0' <- S.toList $ S.length $ S.copy $
+                         S.splitAt maxBufLen src0
+  let mdl0 = Mdl.addCounts Mdl.empty buf0
+  (cdts0,()) <- countJointsM $
+                withPB n0 "Initializing joint counts" $
+                S.each buf0
+  let bel0 = n0
+      sls0 = V.replicate 256 1
+
+  go $ TrainState mdl0 M.empty Trie.empty buf0 src0' cdts0 bel0 sls0
 
   where
     -- | O(log(n)) equiv. of M.filter (> 0) .: M.unionWith (+)

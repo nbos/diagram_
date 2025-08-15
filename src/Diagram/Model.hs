@@ -221,7 +221,7 @@ scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
     -- ss a multiset permutation of counts ks
     ssInfoDelta
       | s0 == s1 = log2e * ( logFactorial sn' - logFactorial sn
-                             - logFactorial (sk0 - 2*sk01) + logFactorial sk0
+                             - logFactorial (sk0 - min (2*sk01) sk0) + logFactorial sk0
                              - logFactorial sk01 )
       | otherwise = log2e * ( logFactorial sn' - logFactorial sn
                              - logFactorial (sk0 - sk01) + logFactorial sk0
