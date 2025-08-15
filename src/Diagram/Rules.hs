@@ -181,7 +181,7 @@ revReduce rs rsm = go
     go (s0:bwd) s1
       | null constrs = s1:s0:bwd
       | otherwise = let s01 = minimum constrs
-                        recip01 = lRecip rs s0 s01
+                        recip01 = lRecip rs s0 (fst $ rs ! s01)
                         bwd' = L.foldl' go bwd recip01
                     in go bwd' s01
       where
