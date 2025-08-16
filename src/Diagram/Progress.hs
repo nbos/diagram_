@@ -71,9 +71,9 @@ newPB' message = newProgressBar style 10 (Progress 0 (2^(28::Int)) ())
     customETA = Label $ \_ _ -> "∞"
 
 padOrTruncate :: Int -> String -> String
-padOrTruncate width str
-    | len == width = str
-    | len <  width = str ++ replicate (width - len) ' '
-    | width <= 3   = take width (replicate width '.')
-    | otherwise    = take (width - 3) str ++ "..."
+padOrTruncate width str = case compare len width of
+  EQ -> str
+  LT -> str ++ replicate (width - len) ' '
+  GT | width <= 3 -> take width (replicate width '.')
+     | otherwise -> take (width - 3) str ++ "..."
   where len = length str

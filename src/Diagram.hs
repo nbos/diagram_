@@ -83,7 +83,7 @@ main = do
             factor = recip ratio
 
         putStrLn $ here $ "Length (bits): " ++
-          printf "%d (%d + %d (%.1f × %d)), %.2f%% of orig., factor: %.4f"
+          printf "%d (%d + %d (%.2f × %d)), %.2f%% of orig., factor: %.4f"
           approxTotalCodeLen mdlCodeLen approxSrcCodeLen scale bufCodeLen
           (ratio * 100) factor
 

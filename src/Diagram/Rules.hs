@@ -19,7 +19,7 @@ import qualified Data.Map.Strict as M
 import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 
-import qualified Data.Vector as B
+import qualified Data.Vector.Strict as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
