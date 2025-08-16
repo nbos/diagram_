@@ -61,6 +61,7 @@ executable diagram
     other-modules:    Diagram
                       Diagram.Rules
                       Diagram.Model
+                      Diagram.Doubly
                       Diagram.Dynamic
                       Diagram.Progress
                       Diagram.Streaming
