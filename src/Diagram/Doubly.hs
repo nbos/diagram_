@@ -1,14 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 -- | Doubly-linked list with random access
 module Diagram.Doubly (module Diagram.Doubly) where
 
 import Control.Monad
 import Control.Monad.Primitive (PrimMonad(PrimState))
 
--- import Data.Primitive.MutVar
---   (modifyMutVar, newMutVar, readMutVar, writeMutVar, MutVar)
 import qualified Data.Vector.Strict as B -- change for Lazy
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
@@ -92,7 +88,7 @@ modify (Doubly _ _ elems _ _) f i = flip (MV.modify elems) i $ \case
 delete :: PrimMonad m => Doubly (PrimState m) a -> Int ->
           m (a, Doubly (PrimState m) a)
 delete (Doubly Nothing _ _ _ _) _ = error "Doubly.delete: empty list"
-delete (Doubly mi0@(Just i0) free elems nexts prevs) i =
+delete (Doubly mi0@(Just i0) free elems prevs nexts) i =
   (MV.read elems i >>=) $ \case
   Nothing -> error $ "Doubly.delete: no element at index " ++ show i
   Just a -> do
@@ -103,9 +99,7 @@ delete (Doubly mi0@(Just i0) free elems nexts prevs) i =
     let mi0' | prv == nxt = Nothing
              | i == i0    = Just nxt
              | otherwise  = mi0
-    return (a, Doubly mi0' (i:free) elems nexts prevs)
-
--- TODO: cons and snoc could probably be better factored
+    return (a, Doubly mi0' (i:free) elems prevs nexts)
 
 -- | Add an element at the begining of the list. Grows the structure in
 -- case there is no free spaces.
@@ -113,13 +107,13 @@ cons :: PrimMonad m => a -> Doubly (PrimState m) a ->
                        m (Doubly (PrimState m) a)
 cons a l@(Doubly _ [] elems _ _) = grow l (max 1 $ MV.length elems)
                                    >>= cons a
-cons a (Doubly Nothing (i:free) elems nexts prevs) = do
+cons a (Doubly Nothing (i:free) elems prevs nexts) = do
   MV.write elems i $ Just a
   MV.write nexts i i
   MV.write prevs i i
-  return $ Doubly (Just i) free elems nexts prevs
+  return $ Doubly (Just i) free elems prevs nexts
 
-cons a (Doubly (Just i0) (i:free) elems nexts prevs) = do
+cons a (Doubly (Just i0) (i:free) elems prevs nexts) = do
   -- i0 (old head)
   i_n <- MV.read prevs i0 -- get last
   MV.write prevs i0 i
@@ -132,4 +126,52 @@ cons a (Doubly (Just i0) (i:free) elems nexts prevs) = do
   MV.write prevs i i_n
   MV.write nexts i i0
 
+  return $ Doubly (Just i) free elems prevs nexts
+{-# INLINABLE cons #-}
+
+-- | Add an element at the end of the list. Grows the structure in
+-- case there is no free spaces.
+snoc :: PrimMonad m => Doubly (PrimState m) a -> a ->
+                       m (Doubly (PrimState m) a)
+snoc l@(Doubly _ [] elems _ _) a = grow l (max 1 $ MV.length elems)
+                                   >>= flip snoc a
+snoc (Doubly Nothing (i:free) elems nexts prevs) a = do
+  MV.write elems i $ Just a
+  MV.write nexts i i
+  MV.write prevs i i
   return $ Doubly (Just i) free elems nexts prevs
+
+snoc (Doubly (Just i0) (i:free) elems nexts prevs) a = do
+  -- i0 (head)
+  i_n <- MV.read prevs i0 -- get last
+  MV.write prevs i0 i
+
+  -- i_n (old last)
+  MV.write nexts i_n i
+
+  -- i (new last)
+  MV.write elems i $ Just a
+  MV.write prevs i i_n
+  MV.write nexts i i0
+
+  return $ Doubly (Just i0) free elems nexts prevs
+{-# INLINABLE snoc #-}
+
+-- | Append the given list to the end of the doubly-linked list
+append :: PrimMonad m => Doubly (PrimState m) a -> [a] ->
+                         m (Doubly (PrimState m) a)
+append = foldM snoc
+
+-- | Shift the list left by 1, placing the first element last
+shiftL :: PrimMonad m => Doubly (PrimState m) a -> m (Doubly (PrimState m) a)
+shiftL l@(Doubly Nothing _ _ _ _) = return l
+shiftL (Doubly (Just i0) free elems prevs nexts) = do
+  i1 <- MV.read nexts i0
+  return $ Doubly (Just i1) free elems prevs nexts
+
+-- | Shift the list right by 1, placing the last element first
+shiftR :: PrimMonad m => Doubly (PrimState m) a -> m (Doubly (PrimState m) a)
+shiftR l@(Doubly Nothing _ _ _ _) = return l
+shiftR (Doubly (Just i0) free elems prevs nexts) = do
+  i_n <- MV.read prevs i0
+  return $ Doubly (Just i_n) free elems prevs nexts
