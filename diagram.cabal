@@ -65,6 +65,7 @@ executable diagram
                       Diagram.Dynamic
                       Diagram.Progress
                       Diagram.Streaming
+                      Diagram.Information
                       Diagram.Util
 
     -- LANGUAGE extensions used by modules in this package.

@@ -35,6 +35,7 @@ import Codec.Arithmetic.Variety.BitVec (BitVec)
 import qualified Codec.Arithmetic.Variety.BitVec as BV
 
 import Diagram.Util
+import Diagram.Information
 
 -- | Self-referrential vector of recipes for the construction of all
 -- symbols above 256 indexed at s-256
@@ -282,16 +283,9 @@ decode bv = do
     go (a:b:rest) = (a,b):go rest
     go (_:_) = error "impossible"
 
--- | The exact length of the code (in bits) of the serialization of the
--- rule set (not very efficient)
-codeLen :: Rules -> Int
-codeLen rs = lenCodeLen + rulesCodeLen
-  where
-    len = V.length rs
-    lenCode = Elias.encodeDelta $ fromIntegral len
-    lenCodeLen = BV.length lenCode
-    rulesCodeLen = Var.codeLen1 $ product $
-                   (\a -> a*a) <$> take len [256..]
+--------------------------
+-- INFORMATION MEASURES --
+--------------------------
 
 -- | The amount of information (in bits) in the rule set (more
 -- efficient)
@@ -304,23 +298,24 @@ information rs = lenCodeInfo + rulesCodeInfo
     rulesCodeInfo = log2e * 2 * ( logFactorial (256 + len)
                                   - logFactorial (256 :: Int) )
 
--- | logBase 2 e, for [nats] * log2e = [bits]
-log2e :: Double
-log2e = 1.44269504088896340735992468100189214
-
-eliasInfo :: Int -> Double
-eliasInfo = fromIntegral
-            . BV.length
-            . Elias.encodeDelta
-            . fromIntegral
-
 -- | The forward difference between the information of the rule set
 -- after adding a new rule relative to the information of the rule set
 -- now. @fwdDeltaInfo rs@ approximately computes @information (snd $
 -- push (s0,s1) rs) - information rs@
-fwdInfoDelta :: Rules -> Double
-fwdInfoDelta rs = lenDeltaInfo + rulesDeltaInfo
+infoDelta :: Rules -> Double
+infoDelta rs = lenDeltaInfo + rulesDeltaInfo
   where
     len = V.length rs
     lenDeltaInfo = eliasInfo (len + 1) - eliasInfo len
     rulesDeltaInfo = log2e * 2 * log (fromIntegral (256 + len))
+
+-- -- | The exact length of the code (in bits) of the serialization of the
+-- -- rule set (exact but not very efficient)
+-- codeLen :: Rules -> Int
+-- codeLen rs = lenCodeLen + rulesCodeLen
+--   where
+--     len = V.length rs
+--     lenCode = Elias.encodeDelta $ fromIntegral len
+--     lenCodeLen = BV.length lenCode
+--     rulesCodeLen = Var.codeLen1 $ product $
+--                    (\a -> a*a) <$> take len [256..]
