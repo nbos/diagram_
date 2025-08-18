@@ -114,8 +114,8 @@ main = do
             return c
 
         hPutStrLn csvHandle $
-          printf "%d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, \"%s\", \"%s\", \"%s\""
-          (R.numSymbols rs) -- %d
+          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, \"%s\", \"%s\", \"%s\""
+          (R.numSymbols rs) approxFactor -- %d, %.4f
           approxTotalInfo rsInfo nInfo ksInfo ssInfo -- %d, %d, %d, %d, %d
           s0 s1 n01 loss -- %d, %d, %d, %f
           (R.toEscapedString rs [s0])

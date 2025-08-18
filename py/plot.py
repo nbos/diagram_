@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import LogLocator, FuncFormatter
 
-def read_columns(csv_path, x_col=0, y_col=4):
+def read_columns(csv_path, x_col=0, y_col=1):
     xs, ys = [], []
     with open(csv_path, "r", newline="", errors="ignore") as f:
         reader = csv.reader(f)
@@ -55,7 +55,7 @@ def main(csv_files):
     all_x, all_y = [], []
 
     for idx, csv_path in enumerate(csv_files):
-        x, y = read_columns(csv_path, x_col=0, y_col=4)
+        x, y = read_columns(csv_path, x_col=0, y_col=1)
         if not x:
             print(f"Warning: no usable data in {csv_path}")
             continue
