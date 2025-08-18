@@ -78,11 +78,9 @@ encode :: Rules -> [Int] -> BitVec
 encode rs ss = rsCode <> nCode <> ksCode <> ssCode
   where
     rsCode = R.encode rs
-    (sks, (ssRank,ssBase)) = Comb.rankMultisetPermutation ss
-    ((n,_),(ksRank,ksBase)) = Comb.rankDistribution (snd <$> sks)
+    (sks,ssCode) = Comb.encodeMultisetPermutation ss
+    ((n,_),ksCode) = Comb.encodeDistribution (snd <$> sks)
     nCode = Elias.encodeDelta $ fromIntegral n
-    ksCode = Var.encode1 ksRank ksBase
-    ssCode = Var.encode1 ssRank ssBase
 
 -- | Deserialize a model+symbol string at the head of a given bit vector
 -- that was serialized using @encode@

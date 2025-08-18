@@ -33,6 +33,10 @@ import qualified Streaming as S
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
+import qualified Codec.Elias.Natural as Elias
+import qualified Codec.Arithmetic.Combinatorics as Comb
+import qualified Codec.Arithmetic.Variety.BitVec as BV
+
 import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
 import qualified Diagram.Rules as R
@@ -88,8 +92,9 @@ main = do
             approxRatio = fromIntegral approxTotalInfo / origInfo
             approxFactor = recip approxRatio
 
-        putStrLn $ here $ "Length (bits): " ++
-          printf "%s (%s + %s + %s + %s), %.2f%% of orig., factor: %.4f"
+        putStrLn $ here $ "LEN: " ++
+          printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
+                  ++ "factor: %.4f, over %.2f%% of input")
           (commaize approxTotalInfo)
           (commaize rsInfo)
           (commaize nInfo)
@@ -97,6 +102,51 @@ main = do
           (commaize ssInfo)
           (approxRatio * 100)
           approxFactor
+          (100 * recip scale)
+
+        -- rs valid.
+        let rsCode = R.encode rs
+            rsCodeLen = BV.length rsCode
+            rsError = 100 * fromIntegral (rsInfo - rsCodeLen)
+                      / fromIntegral rsCodeLen :: Double
+            rsDecoded = fst <$> R.decode rsCode
+        putStrLn $ printf "   rs: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+          rsInfo rsCodeLen rsError
+          (show $ Just rs == rsDecoded)
+
+        -- n valid.
+        srcL <- R.subst rs <$> S.toList_ src
+        let ssReal = buf ++ srcL
+            (sks,ssCode) = Comb.encodeMultisetPermutation ssReal
+            ksReal = snd <$> sks
+            ((nReal,_),ksCode) = Comb.encodeDistribution ksReal
+            nCode = Elias.encodeDelta $ fromIntegral nReal
+
+            nCodeLen = BV.length nCode
+            nError = 100 * fromIntegral (nInfo - nCodeLen)
+                     / fromIntegral nCodeLen :: Double
+            nDecoded = fst <$> Elias.decodeDelta nCode
+        putStrLn $ printf "   n:  est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+          nInfo nCodeLen nError
+          (show $ Just (fromIntegral nReal) == nDecoded)
+
+        -- ks valid.
+        let ksCodeLen = BV.length ksCode
+            ksError = 100 * fromIntegral (ksInfo - ksCodeLen)
+                      / fromIntegral ksCodeLen :: Double
+            ksDecoded = fst <$> Comb.decodeDistribution (n,R.numSymbols rs) ksCode
+        putStrLn $ printf "   ks: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+          ksInfo ksCodeLen ksError
+          (show $ Just ksReal == ksDecoded)
+
+        -- ss valid.
+        let ssCodeLen = BV.length ssCode
+            ssError = 100 * fromIntegral (ssInfo - ssCodeLen)
+                      / fromIntegral ssCodeLen :: Double
+            ssDecoded = fst <$> Comb.decodeMultisetPermutation (zip [0..] ksReal) ssCode
+        putStrLn $ printf "   ss: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+          ssInfo ssCodeLen ssError
+          (show $ Just ssReal == ssDecoded)
 
         cdtList <- pbSeq (M.size cdts) (here "Computing losses") $
                    (<$> M.toList cdts) $ \(s0s1,n01) ->
@@ -106,11 +156,11 @@ main = do
         putStrLn $ here "Sorting candidates..."
         (loss,(s0,s1),n01) <- case L.sort cdtList of
           [] -> error "no candidates"
-          (c@(loss,(s0,s1),_):cdts') -> do
+          (c@(loss,_,_):cdts') -> do
             when (loss < 0) $ putStrLn $ here $
-                              "Intro: " ++ showJoint rs s0 s1
-            putStrLn $ here "Top candidates:"
-            forM_ (c:take 4 cdts') (putStrLn . showCdt rs)
+                              "Intro: \n   " ++ showCdt rs c
+            putStrLn $ here "Next top candidates:"
+            forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
 
         hPutStrLn csvHandle $
@@ -144,7 +194,8 @@ main = do
 
         -- extend the buffer
         ss :> src' <- S.toList $
-                      R.splitAtSubst rs' rsm' trie' (n - n') src
+                      R.splitAtSubst rs' rsm' trie' (n - n') $
+                      S.each srcL -- src
 
         -- refine state with new symbols
         let mdl'' = Mdl.addCounts mdl' ss
@@ -181,15 +232,11 @@ main = do
     sub :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
     sub = M.differenceWith (nothingIf (== 0) .: (-))
 
-    showCdt rs (loss,(s0,s1),n01) = "   "
-      ++ show loss ++ ": "
-      ++ showJoint rs s0 s1
-      ++ " (" ++ show n01 ++ ")"
-
-    showJoint rs s0 s1 = "\"" ++ R.toEscapedString rs [s0]
-      ++ "\" + \"" ++ R.toEscapedString rs [s1]
-      ++ "\" ==> \"" ++ R.toEscapedString rs [s0,s1] ++ "\" "
-      ++ show (s0,s1)
+    showCdt rs (loss,(s0,s1),n01) = printf "%.2f bits (%d × (s%d,s%d)): %s + %s ==> %s"
+      loss n01 s0 s1
+      (show $ R.toEscapedString rs [s0])
+      (show $ R.toEscapedString rs [s1])
+      (show $ R.toEscapedString rs [s0,s1])
 
     -- DEBUG --
     --       deltam = M.filter (uncurry (/=)) $ mergeMaps m' $
@@ -406,7 +453,7 @@ writeStream mv = S.mapM_ (uncurry $ MV.write mv)
 commaize :: (Integral a, Show a) => a -> String
 commaize n =
   let s = show (abs n)
-      chunks = reverse . group3 . reverse $ s
+      chunks = reverse . fmap reverse . group3 . reverse $ s
       body = L.intercalate "," chunks
   in (if n < 0 then "-" else "") ++ body
   where
