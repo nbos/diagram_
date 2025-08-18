@@ -27,8 +27,6 @@ import qualified Data.Vector.Generic.Mutable as MV
 import Streaming
 import qualified Streaming.Prelude as S
 
-import Numeric.SpecFunctions (logFactorial)
-
 import qualified Codec.Elias.Natural as Elias
 import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
@@ -295,8 +293,8 @@ information rs = lenCodeInfo + rulesCodeInfo
     len = V.length rs
     lenCode = Elias.encodeDelta $ fromIntegral len
     lenCodeInfo = fromIntegral $ BV.length lenCode
-    rulesCodeInfo = log2e * 2 * ( logFactorial (256 + len)
-                                  - logFactorial (256 :: Int) )
+    rulesCodeInfo = log2e * 2 * ( iLogFactorial (256 + len)
+                                  - iLogFactorial (256 :: Int) )
 
 -- | The forward difference between the information of the rule set
 -- after adding a new rule relative to the information of the rule set

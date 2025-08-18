@@ -1,5 +1,6 @@
 module Diagram.Information (module Diagram.Information) where
 
+import qualified Numeric.SpecFunctions as Spec
 import qualified Codec.Elias.Natural as Elias
 import qualified Codec.Arithmetic.Variety.BitVec as BV
 
@@ -20,3 +21,9 @@ eliasInfo = fromIntegral . eliasCodeLen
 
 scaleInt :: Double -> Int -> Int
 scaleInt scale = round . (scale*) . fromIntegral
+
+logFactorial :: Double -> Double
+logFactorial = Spec.logGamma . (+1)
+
+iLogFactorial :: Int -> Double
+iLogFactorial = Spec.logFactorial

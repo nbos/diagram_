@@ -12,8 +12,6 @@ import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
 
-import Numeric.SpecFunctions (logFactorial)
-
 import qualified Codec.Elias as Elias
 import qualified Codec.Arithmetic.Combinatorics as Comb
 import qualified Codec.Arithmetic.Variety as Var
@@ -102,35 +100,7 @@ decode bv = do
 -- INFORMATION MEASURES --
 --------------------------
 
--- | Compute the information, in bits, of a distribution of `n` elements
--- into `k` bins through the stars-and-bars angle
-distrInfo :: Int -> Int -> Double
-distrInfo _ 0 = 0.0
-distrInfo n k = log2e * ( logFactorial (stars + bars)
-                          - logFactorial stars
-                          - logFactorial bars )
-  where stars = n
-        bars = k - 1
-
--- | Information in bits of the rank of a multiset permutation resolving
--- a string for the given model
-stringInfo :: Model -> Double
-stringInfo (Model _ n ks)
-  | n <= 1 = 0
-  | otherwise = log2e * (logFactorial n - V.sum (V.map logFactorial ks))
-
-stringInfoDelta :: Int -> ((Int,Int),(Int,Int)) -> Int -> Double
-stringInfoDelta n ((s0,k0),(s1,k1)) k01
-  | s0 == s1 = log2e * ( logFactorial n' - logFactorial n
-                         - logFactorial (k0 - 2*k01) + logFactorial k0
-                         - logFactorial k01 )
-  | otherwise = log2e * ( logFactorial n' - logFactorial n
-                          - logFactorial (k0 - k01) + logFactorial k0
-                          - logFactorial (k1 - k01) + logFactorial k1
-                          - logFactorial k01 )
-  where n' = n - k01
-{-# INLINE stringInfoDelta #-}
-
+-- MODEL * STRING --
 -- | Information in bits of the given model + a sampled symbol string
 information :: Model -> Double
 information mdl@(Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
@@ -140,27 +110,11 @@ information mdl@(Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
     ksInfo = distrInfo n (V.length ks)
     ssInfo = stringInfo mdl
 
+-- Δ
 -- | Compute the change in code length (bits) of the model + symbol
 -- string matching it given a new rule introduction
 infoDelta :: Model -> (Int,Int) -> Int -> Double
-infoDelta (Model rs n ks) (s0,s1) = infoDelta_ rs n ((s0,k0),(s1,k1))
-  where
-    k0 = ks V.! s0
-    k1 = ks V.! s1
-
--- | `infoDelta` if the model's size `n` was scaled by `scale`
-scaledInfoDelta :: Double -> Model -> (Int,Int) -> Int -> Double
-scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
-  infoDelta_ rs sn ((s0,sk0),(s1,sk1)) sk01
-  where -- FIXME : when s0 == s1, 2*sk0 is not necessarily <= sk01
-    sc = scaleInt scale
-    sn   = sc n
-    sk01 = sc k01
-    sk0  = sc $ ks V.! s0
-    sk1  = sc $ ks V.! s1
-
-infoDelta_ :: Rules -> Int -> ((Int,Int),(Int,Int)) -> Int -> Double
-infoDelta_ rs n ((s0,k0),(s1,k1)) k01 =
+infoDelta (Model rs n ks) (s0,s1) k01 =
   rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
   where
     numSymbols = R.numSymbols rs
@@ -174,8 +128,84 @@ infoDelta_ rs n ((s0,k0),(s1,k1)) k01 =
                   - distrInfo n numSymbols -- old
     -- ss a multiset permutation of counts ks:
     ssInfoDelta = stringInfoDelta n ((s0,k0),(s1,k1)) k01
-{-# INLINE infoDelta_ #-}
 
+    k0 = ks V.! s0
+    k1 = ks V.! s1
+
+-- | Expected `infoDelta` when the model's size `n` is scaled by `scale`
+scaledInfoDelta :: Double -> Model -> (Int,Int) -> Int -> Double
+scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
+    rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+  where
+    sn   = scale * fromIntegral n
+    sk01 = scale * fromIntegral k01
+    sk0  = scale * fromIntegral (ks V.! s0)
+    sk1  = scale * fromIntegral (ks V.! s1)
+    sn'  = sn - sk01
+
+    numSymbols = R.numSymbols rs
+    fNumSymbols = fromIntegral numSymbols
+    -- rules info delta (constant):
+    rsInfoDelta = R.infoDelta rs
+    -- n elias encoding:
+    nInfoDelta = eliasInfo (round sn') - eliasInfo (round sn)
+    -- ks a distribution of n elements:
+    ksInfoDelta = fDistrInfo sn' (fNumSymbols + 1) -- new
+                  - fDistrInfo sn fNumSymbols -- old
+    -- ss a multiset permutation of counts ks:
+    ssInfoDelta = fStringInfoDelta sn ((s0,sk0),(s1,sk1)) sk01
+
+-- DISTR's, i.e. ks --
+distrInfoWith :: (Num a, Eq a) => (a -> Double) -> a -> a -> Double
+distrInfoWith _ _ 0 = 0.0
+distrInfoWith logFact n k = log2e * ( logFact (stars + bars)
+                                      - logFact stars
+                                      - logFact bars )
+  where stars = n
+        bars = k - 1
+{-# INLINE distrInfoWith #-}
+
+-- | Compute the information, in bits, of a distribution of `n` elements
+-- into `k` bins through the stars-and-bars angle
+distrInfo :: Int -> Int -> Double
+distrInfo = distrInfoWith iLogFactorial
+
+-- | Compute the information, in bits, of a distribution of `n` elements
+-- into `k` bins through the stars-and-bars angle
+fDistrInfo :: Double -> Double -> Double
+fDistrInfo = distrInfoWith logFactorial
+
+-- STRING's, i.e. ss, buf, src --
+-- | Information in bits of the rank of a multiset permutation resolving
+-- a string for the given model
+stringInfo :: Model -> Double
+stringInfo (Model _ n ks)
+  | n <= 1 = 0
+  | otherwise = log2e * (iLogFactorial n - V.sum (V.map iLogFactorial ks))
+
+-- Δ
+stringInfoDeltaWith :: Num a => (a -> Double) ->
+                       a -> ((Int,a),(Int,a)) -> a -> Double
+stringInfoDeltaWith logFact n ((s0,k0),(s1,k1)) k01
+  | s0 == s1 = log2e * ( logFact n' - logFact n
+                         - logFact (k0 - 2*k01) + logFact k0
+                         - logFact k01 )
+  | otherwise = log2e * ( logFact n' - logFact n
+                          - logFact (k0 - k01) + logFact k0
+                          - logFact (k1 - k01) + logFact k1
+                          - logFact k01 )
+  where n' = n - k01
+{-# INLINE stringInfoDeltaWith #-}
+
+stringInfoDelta :: Int -> ((Int,Int),(Int,Int)) -> Int -> Double
+stringInfoDelta = stringInfoDeltaWith iLogFactorial
+{-# INLINE stringInfoDelta #-}
+
+fStringInfoDelta :: Double -> ((Int,Double),(Int,Double)) -> Double -> Double
+fStringInfoDelta = stringInfoDeltaWith logFactorial
+{-# INLINE fStringInfoDelta #-}
+
+-- -- GRAVEYARD --
 -- -- | Code length in bits of the serialization of the model
 -- modelCodeLen :: Model -> Int
 -- modelCodeLen (Model rs n _) = rsCodeLen + nCodeLen
