@@ -38,6 +38,7 @@ import qualified Diagram.Model as Mdl
 import qualified Diagram.Rules as R
 import Diagram.Progress
 import Diagram.Util hiding (ratio)
+import Diagram.Information
 
 data TrainState m = TrainState {
   trainModel :: !Model, -- model fitted on trainBuffer
@@ -61,6 +62,7 @@ main = do
   srcHandle <- openFile filename ReadMode
   srcLen <- hFileSize srcHandle -- number of atoms in the source
   let origCodeLen = srcLen * 8 -- in bits
+      origInfo = fromIntegral origCodeLen :: Double
 
   createDirectoryIfMissing True "data"
   currentTime <- getCurrentTime
@@ -69,23 +71,32 @@ main = do
                     ++ "-run-" ++ timestamp ++ ".csv"
   csvHandle <- openFile logFilePath WriteMode
 
-  let go (TrainState mdl@(Model rs n _) rsm trie buf src cdts bel sls) = do
+  -- <main loop>
+  let go (TrainState mdl@(Model rs n ks) rsm trie buf src cdts bel sls) = do
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
-
-            mdlCodeLen = Mdl.modelCodeLen mdl
-            bufCodeLen = Mdl.fastStringCodeLen mdl
             scale = fromIntegral srcLen / fromIntegral bel
-            approxSrcCodeLen = Mdl.scaleInt scale bufCodeLen
-            approxTotalCodeLen = mdlCodeLen + approxSrcCodeLen
 
-            ratio = fromIntegral approxTotalCodeLen
-                    / fromIntegral origCodeLen :: Double
-            factor = recip ratio
+            -- <Mdl.scaledInformation>
+            sn     = scale * fromIntegral n
+            rsInfo = ceiling @_ @Int $ R.information rs
+            nInfo  = ceiling @_ @Int $ eliasInfo (round sn)
+            ksInfo = ceiling @_ @Int $ Mdl.fDistrInfo sn (fromIntegral $ V.length ks)
+            ssInfo = ceiling @_ @Int $ Mdl.scaledStringInfo scale mdl
+            approxTotalInfo = rsInfo + nInfo + ksInfo + ssInfo
+            -- </Mdl.scaledInformation>
+
+            approxRatio = fromIntegral approxTotalInfo / origInfo
+            approxFactor = recip approxRatio
 
         putStrLn $ here $ "Length (bits): " ++
-          printf "%d (%d + %d (%.2f × %d)), %.2f%% of orig., factor: %.4f"
-          approxTotalCodeLen mdlCodeLen approxSrcCodeLen scale bufCodeLen
-          (ratio * 100) factor
+          printf "%s (%s + %s + %s + %s), %.2f%% of orig., factor: %.4f"
+          (commaize approxTotalInfo)
+          (commaize rsInfo)
+          (commaize nInfo)
+          (commaize ksInfo)
+          (commaize ssInfo)
+          (approxRatio * 100)
+          approxFactor
 
         cdtList <- pbSeq (M.size cdts) (here "Computing losses") $
                    (<$> M.toList cdts) $ \(s0s1,n01) ->
@@ -103,17 +114,18 @@ main = do
             return c
 
         hPutStrLn csvHandle $
-          printf "%d, %d, %d, %d, %f, %d, %d, %d, %f, \"%s\", \"%s\", \"%s\""
-          (R.numSymbols rs) approxTotalCodeLen mdlCodeLen approxSrcCodeLen factor
-          s0 s1 n01 loss
+          printf "%d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, \"%s\", \"%s\", \"%s\""
+          (R.numSymbols rs) -- %d
+          approxTotalInfo rsInfo nInfo ksInfo ssInfo -- %d, %d, %d, %d, %d
+          s0 s1 n01 loss -- %d, %d, %d, %f
           (R.toEscapedString rs [s0])
           (R.toEscapedString rs [s1])
           (R.toEscapedString rs [s0,s1])
         hFlush csvHandle
 
-        when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.") >>
-                          hClose csvHandle >>
-                          exitSuccess )
+        when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.")
+                          >> hClose csvHandle
+                          >> exitSuccess )
 
         let (s01, mdl'@(Model rs' n' _)) = Mdl.pushRule mdl (s0,s1) n01
             rsm' = M.insert (s0,s1) s01 rsm
@@ -144,7 +156,7 @@ main = do
 
         putStrLn ""
         go $ TrainState mdl'' rsm' trie' buf'' src' cdts' bel' sls'
-
+  -- </main loop>
 
       src0 = S.map fromEnum $ Q.unpack $ Q.fromHandle srcHandle
 
@@ -157,6 +169,7 @@ main = do
   let bel0 = n0
       sls0 = V.replicate 256 1
 
+  -- go
   go $ TrainState mdl0 M.empty Trie.empty buf0 src0' cdts0 bel0 sls0
 
   where
@@ -389,3 +402,14 @@ writeStream :: (PrimMonad m, MV.MVector v b) =>
                v (PrimState m) b -> Stream (Of b) m r -> m r
 writeStream mv = S.mapM_ (uncurry $ MV.write mv)
                  . S.zip (S.enumFrom 0)
+
+commaize :: (Integral a, Show a) => a -> String
+commaize n =
+  let s = show (abs n)
+      chunks = reverse . group3 . reverse $ s
+      body = L.intercalate "," chunks
+  in (if n < 0 then "-" else "") ++ body
+  where
+    group3 :: [a] -> [[a]]
+    group3 [] = []
+    group3 xs = let (h,t) = splitAt 3 xs in h : group3 t

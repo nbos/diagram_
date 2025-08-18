@@ -101,6 +101,7 @@ decode bv = do
 --------------------------
 
 -- MODEL * STRING --
+
 -- | Information in bits of the given model + a sampled symbol string
 information :: Model -> Double
 information mdl@(Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
@@ -110,7 +111,20 @@ information mdl@(Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
     ksInfo = distrInfo n (V.length ks)
     ssInfo = stringInfo mdl
 
+-- | Information in bits of the given model + a sampled symbol string if
+-- the string the model was fit on `scale` times as big
+scaledInformation :: Double -> Model -> Double
+scaledInformation scale mdl@(Model rs n ks) =
+  rsInfo + nInfo + ksInfo + ssInfo
+  where
+    sn     = scale * fromIntegral n
+    rsInfo = R.information rs
+    nInfo  = eliasInfo (round sn)
+    ksInfo = fDistrInfo sn (fromIntegral $ V.length ks)
+    ssInfo = scaledStringInfo scale mdl
+
 -- Δ
+
 -- | Compute the change in code length (bits) of the model + symbol
 -- string matching it given a new rule introduction
 infoDelta :: Model -> (Int,Int) -> Int -> Double
@@ -156,6 +170,9 @@ scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
     ssInfoDelta = fStringInfoDelta sn ((s0,sk0),(s1,sk1)) sk01
 
 -- DISTR's, i.e. ks --
+
+-- | Compute the information, in bits, of a distribution of `n` elements
+-- into `k` bins through "stars-and-bars"
 distrInfoWith :: (Num a, Eq a) => (a -> Double) -> a -> a -> Double
 distrInfoWith _ _ 0 = 0.0
 distrInfoWith logFact n k = log2e * ( logFact (stars + bars)
@@ -166,16 +183,17 @@ distrInfoWith logFact n k = log2e * ( logFact (stars + bars)
 {-# INLINE distrInfoWith #-}
 
 -- | Compute the information, in bits, of a distribution of `n` elements
--- into `k` bins through the stars-and-bars angle
+-- into `k` bins through "stars-and-bars"
 distrInfo :: Int -> Int -> Double
 distrInfo = distrInfoWith iLogFactorial
 
 -- | Compute the information, in bits, of a distribution of `n` elements
--- into `k` bins through the stars-and-bars angle
+-- into `k` bins through "stars-and-bars"
 fDistrInfo :: Double -> Double -> Double
 fDistrInfo = distrInfoWith logFactorial
 
 -- STRING's, i.e. ss, buf, src --
+
 -- | Information in bits of the rank of a multiset permutation resolving
 -- a string for the given model
 stringInfo :: Model -> Double
@@ -183,7 +201,14 @@ stringInfo (Model _ n ks)
   | n <= 1 = 0
   | otherwise = log2e * (iLogFactorial n - V.sum (V.map iLogFactorial ks))
 
+scaledStringInfo :: Double -> Model -> Double
+scaledStringInfo scale (Model _ n ks)
+  | n <= 1 = 0
+  | otherwise = log2e * (sLogFact n - V.sum (V.map sLogFact ks))
+  where sLogFact = logFactorial . (scale*) . fromIntegral
+
 -- Δ
+
 stringInfoDeltaWith :: Num a => (a -> Double) ->
                        a -> ((Int,a),(Int,a)) -> a -> Double
 stringInfoDeltaWith logFact n ((s0,k0),(s1,k1)) k01
