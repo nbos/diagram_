@@ -10,6 +10,7 @@ import System.Environment (getArgs)
 import System.Exit
 
 import Control.Monad
+import Control.Monad.ST
 import Control.Monad.Primitive
 
 import Text.Printf
@@ -118,7 +119,13 @@ main = do
         srcL <- R.subst rs <$> S.toList_ src
         let ssReal = buf ++ srcL
             (sks,ssCode) = Comb.encodeMultisetPermutation ssReal
-            ksReal = snd <$> sks
+            numSymbols = R.numSymbols rs
+            ksReal = V.toList $ runST $ do -- add bins with zero counts
+              mutks <- U.unsafeThaw $ U.replicate numSymbols 0
+              forM_ sks $ uncurry $ MV.write mutks
+              U.unsafeFreeze mutks
+
+            -- ksReal = snd <$> sks
             ((nReal,_),ksCode) = Comb.encodeDistribution ksReal
             nCode = Elias.encodeDelta $ fromIntegral nReal
 
@@ -134,10 +141,15 @@ main = do
         let ksCodeLen = BV.length ksCode
             ksError = 100 * fromIntegral (ksInfo - ksCodeLen)
                       / fromIntegral ksCodeLen :: Double
-            ksDecoded = fst <$> Comb.decodeDistribution (n,R.numSymbols rs) ksCode
+            ksDecoded = fst <$> Comb.decodeDistribution (nReal,numSymbols) ksCode
         putStrLn $ printf "   ks: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
           ksInfo ksCodeLen ksError
           (show $ Just ksReal == ksDecoded)
+        when (Just ksReal /= ksDecoded) $ do
+          print nReal
+          print numSymbols
+          putStr "ksReal: " >> print ksReal
+          putStr "ksDecoded: " >> print ksDecoded
 
         -- ss valid.
         let ssCodeLen = BV.length ssCode
@@ -147,6 +159,9 @@ main = do
         putStrLn $ printf "   ss: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
           ssInfo ssCodeLen ssError
           (show $ Just ssReal == ssDecoded)
+        when (Just ssReal /= ssDecoded) $ do
+          putStr "ssReal: " >> print ssReal
+          putStr "ssDecoded: " >> print ssDecoded
 
         cdtList <- pbSeq (M.size cdts) (here "Computing losses") $
                    (<$> M.toList cdts) $ \(s0s1,n01) ->
@@ -232,7 +247,7 @@ main = do
     sub :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
     sub = M.differenceWith (nothingIf (== 0) .: (-))
 
-    showCdt rs (loss,(s0,s1),n01) = printf "%.2f bits (%d × (s%d,s%d)): %s + %s ==> %s"
+    showCdt rs (loss,(s0,s1),n01) = printf "%.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
       (show $ R.toEscapedString rs [s0])
       (show $ R.toEscapedString rs [s1])

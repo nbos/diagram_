@@ -78,8 +78,13 @@ encode :: Rules -> [Int] -> BitVec
 encode rs ss = rsCode <> nCode <> ksCode <> ssCode
   where
     rsCode = R.encode rs
+    numSymbols = R.numSymbols rs
     (sks,ssCode) = Comb.encodeMultisetPermutation ss
-    ((n,_),ksCode) = Comb.encodeDistribution (snd <$> sks)
+    ks = V.toList $ runST $ do -- add bins with zero counts
+      mutks <- U.unsafeThaw $ U.replicate numSymbols 0
+      forM_ sks $ uncurry $ MV.write mutks
+      U.unsafeFreeze mutks
+    ((n,_),ksCode) = Comb.encodeDistribution ks
     nCode = Elias.encodeDelta $ fromIntegral n
 
 -- | Deserialize a model+symbol string at the head of a given bit vector
