@@ -14,7 +14,6 @@ import qualified Data.Vector.Generic.Mutable as MV
 
 import qualified Codec.Elias as Elias
 import qualified Codec.Arithmetic.Combinatorics as Comb
-import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
 
 import Diagram.Rules (Rules)
@@ -207,8 +206,8 @@ stringInfo (Model _ n ks)
 scaledStringInfo :: Double -> Model -> Double
 scaledStringInfo scale (Model _ n ks)
   | n <= 1 = 0
-  | otherwise = log2e * (sLogFact n - V.sum (V.map sLogFact ks))
-  where sLogFact = logFactorial . (scale*) . fromIntegral
+  | otherwise = log2e * (scaleLogFact n - V.sum (V.map scaleLogFact ks))
+  where scaleLogFact = logFactorial . (scale*) . fromIntegral
 
 -- Δ
 

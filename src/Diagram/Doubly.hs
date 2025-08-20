@@ -5,7 +5,7 @@ module Diagram.Doubly (module Diagram.Doubly) where
 import Control.Monad
 import Control.Monad.Primitive (PrimMonad(PrimState))
 
-import qualified Data.Vector.Strict as B -- change for Lazy
+import qualified Data.Vector.Strict as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 

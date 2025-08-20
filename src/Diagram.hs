@@ -243,11 +243,10 @@ main = do
     add :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
     add = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id
 
-    -- | O(log(n) equiv. of M.filter (> 0) .: M.unionWith (-)
     sub :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
     sub = M.differenceWith (nothingIf (== 0) .: (-))
 
-    showCdt rs (loss,(s0,s1),n01) = printf "%.2f bits (%d × s%d s%d): %s + %s ==> %s"
+    showCdt rs (loss,(s0,s1),n01) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
       (show $ R.toEscapedString rs [s0])
       (show $ R.toEscapedString rs [s1])
@@ -465,9 +464,10 @@ writeStream :: (PrimMonad m, MV.MVector v b) =>
 writeStream mv = S.mapM_ (uncurry $ MV.write mv)
                  . S.zip (S.enumFrom 0)
 
+-- TODO: write this properly
 commaize :: (Integral a, Show a) => a -> String
 commaize n =
-  let s = show (abs n)
+  let s = show $ abs $ fromIntegral @_ @Integer n
       chunks = reverse . fmap reverse . group3 . reverse $ s
       body = L.intercalate "," chunks
   in (if n < 0 then "-" else "") ++ body
