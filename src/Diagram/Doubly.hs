@@ -8,37 +8,37 @@ import Streaming
 import qualified Streaming.Prelude as S
 
 import Data.Maybe
-import qualified Data.Vector.Strict as B
 import qualified Data.Vector.Unboxed as U
+import Data.Vector.Generic.Mutable (MVector)
 import qualified Data.Vector.Generic.Mutable as MV
 
 type Index = Int
-data Doubly s a = Doubly
+data Doubly v s a = Doubly
   !(Maybe Index)       -- ^ head index
   ![Index]             -- ^ freed indexes
-  !(B.MVector s a)     -- ^ elements
+  !(v s a)             -- ^ elements
   !(U.MVector s Index) -- ^ previous indexes
   !(U.MVector s Index) -- ^ next indexes
 
 -- | Allocate a new list of the given size with undefined values
-new :: PrimMonad m => Int -> m (Doubly (PrimState m) a)
+new :: (PrimMonad m, MVector v a) => Int -> m (Doubly v (PrimState m) a)
 new sz = do
   elems <- MV.new sz
   prevs <- U.unsafeThaw (U.fromList ((sz-1):[0..sz-2]))
   nexts <- U.unsafeThaw (U.fromList ([1..sz-1]++[0]))
   return $ Doubly Nothing [0..sz-1] elems prevs nexts
 
-capacity :: Doubly s a -> Int
+capacity :: MVector v a => Doubly v s a -> Int
 capacity (Doubly _ _ elems _ _) = MV.length elems
 
-full :: Doubly s a -> Bool
+full :: Doubly v s a -> Bool
 full (Doubly _ [] _ _ _) = True
 full _ = False
 
 -- | Clone the data in the given list into a new list with `n`
 -- additional free slots
-grow :: PrimMonad m => Doubly (PrimState m) a -> Int ->
-        m (Doubly (PrimState m) a)
+grow :: (PrimMonad m, MVector v a) =>
+        Doubly v (PrimState m) a -> Int -> m (Doubly v (PrimState m) a)
 grow (Doubly mi0 free elems nexts prevs) n = do
   let len = MV.length elems
       len' = len + n
@@ -50,10 +50,11 @@ grow (Doubly mi0 free elems nexts prevs) n = do
   return $ Doubly mi0 free' elems' nexts' prevs'
 
 -- | Construct a doubly-linked list from a singly-linked list
-fromList :: PrimMonad m => [a] -> m (Doubly (PrimState m) a)
+fromList :: (PrimMonad m, MVector v a) => [a] -> m (Doubly v (PrimState m) a)
 fromList as = do
-  elems <- B.unsafeThaw $ B.fromList as
-  let len = MV.length elems
+  let len = length as
+  elems <- MV.new len
+  forM_ (zip [0..] as) $ uncurry $ MV.write elems
   prevs <- U.unsafeThaw (U.fromList ((len-1):[0..len-2]))
   nexts <- U.unsafeThaw (U.fromList ([1..len-1]++[0]))
   return $ Doubly (Just 0) [] elems prevs nexts
@@ -61,10 +62,11 @@ fromList as = do
 -- | Read the doubly-linked list into a singly-linked list. Use toStream
 -- to not @sequence@ the reads.Applicative
 -- TODO: return index-value pairs?
-toList :: PrimMonad m => Doubly (PrimState m) a -> m [a]
+toList :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m [a]
 toList = S.toList_ . toStream
 
-toStream :: PrimMonad m => Doubly (PrimState m) a -> Stream (Of a) m ()
+toStream :: (PrimMonad m, MVector v a) =>
+            Doubly v (PrimState m) a -> Stream (Of a) m ()
 toStream (Doubly Nothing _ _ _ _) = return () -- empty
 toStream (Doubly (Just i0) _ elems _ nexts) = go i0
   where
@@ -75,10 +77,11 @@ toStream (Doubly (Just i0) _ elems _ nexts) = go i0
 
 -- | Read the doubly-linked list into a singly-linked list in reverse
 -- order. Use toRevStream to not @sequence@ the reads.
-toRevList :: PrimMonad m => Doubly (PrimState m) a -> m [a]
+toRevList :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m [a]
 toRevList = S.toList_ . toStream
 
-toRevStream :: PrimMonad m => Doubly (PrimState m) a -> Stream (Of a) m ()
+toRevStream :: (PrimMonad m, MVector v a) =>
+               Doubly v (PrimState m) a -> Stream (Of a) m ()
 toRevStream (Doubly Nothing _ _ _ _) = return () -- empty
 toRevStream (Doubly (Just i0) _ elems prevs _) = go i0
   where
@@ -87,27 +90,30 @@ toRevStream (Doubly (Just i0) _ elems prevs _) = go i0
               S.yield a
               when (prv /= i0) $ go prv -- cont.
 
-read :: PrimMonad m => Doubly (PrimState m) a -> Index -> m a
+read :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> m a
 read (Doubly _ _ elems _ _) = MV.read elems
 
 -- | Return the index of the element preceeding the element at a given
 -- index in the list
-prev :: PrimMonad m => Doubly (PrimState m) a -> Index -> m Int
+prev :: (PrimMonad m, MVector v a) =>
+        Doubly v (PrimState m) a -> Index -> m Index
 prev (Doubly _ _ _ _ prevs) = MV.read prevs
 
 -- | Return the index of the element following the element at a given
 -- index in the list
-next :: PrimMonad m => Doubly (PrimState m) a -> Index -> m Int
+next :: (PrimMonad m, MVector v a) =>
+        Doubly v (PrimState m) a -> Index -> m Index
 next (Doubly _ _ _ nexts _) = MV.read nexts
 
 -- | Modify an element at a given index. Throws an error if index is
 -- undefined
-modify :: PrimMonad m => Doubly (PrimState m) a -> (a -> a) -> Index -> m ()
+modify :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a ->
+                                        (a -> a) -> Index -> m ()
 modify (Doubly _ _ elems _ _) = MV.modify elems
 
 -- | Delete the element at a given index and seam previous with next.
-delete :: PrimMonad m => Doubly (PrimState m) a -> Index ->
-                         m (Doubly (PrimState m) a)
+delete :: (PrimMonad m, MVector v a) =>
+          Doubly v (PrimState m) a -> Index -> m (Doubly v (PrimState m) a)
 delete l@(Doubly Nothing _ _ _ _) _ = return l -- empty ==> empty
 delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
     prv <- MV.read prevs i -- prev <- i
@@ -119,8 +125,8 @@ delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
              | otherwise  = mi0
     return $ Doubly mi0' (i:free) elems prevs nexts
 
-elemIndices :: (PrimMonad m, Eq a) => Doubly (PrimState m) a -> a ->
-                                      Stream (Of Index) m ()
+elemIndices :: (PrimMonad m, MVector v a, Eq a) =>
+               Doubly v (PrimState m) a -> a -> Stream (Of Index) m ()
 elemIndices (Doubly Nothing _ _ _ _) _ = return ()
 elemIndices (Doubly (Just i0) _ elems _ nexts) a = go i0
   where
@@ -130,8 +136,8 @@ elemIndices (Doubly (Just i0) _ elems _ nexts) a = go i0
       nxt <- lift $ MV.read nexts i
       when (nxt /= i0) $ go nxt
 
-jointIndices :: (PrimMonad m, Eq a) => Doubly (PrimState m) a -> (a,a) ->
-                                       Stream (Of Index) m ()
+jointIndices :: (PrimMonad m, MVector v a, Eq a) =>
+                Doubly v (PrimState m) a -> (a,a) -> Stream (Of Index) m ()
 jointIndices (Doubly Nothing _ _ _ _) _ = return ()
 jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
   where
@@ -151,16 +157,16 @@ jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
 -- | Append an element at the begining of the list. Grows the structure
 -- in case there are no free spaces.
 -- TODO: return index?
-cons :: PrimMonad m => a -> Doubly (PrimState m) a ->
-                       m (Doubly (PrimState m) a)
+cons :: (PrimMonad m, MVector v a) =>
+        a -> Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
 cons a l = fromMaybe (grow l (max 1 $ capacity l) >>= cons a) $
            tryCons a l
 
 -- | Try to append an element at the beginning of the list, if the
 -- capacity allows it.
 -- TODO: return index?
-tryCons :: PrimMonad m => a -> Doubly (PrimState m) a ->
-                          Maybe (m (Doubly (PrimState m) a))
+tryCons :: (PrimMonad m, MVector v a) =>
+           a -> Doubly v (PrimState m) a -> Maybe (m (Doubly v (PrimState m) a))
 tryCons _ (Doubly _ [] _ _ _) = Nothing
 tryCons a (Doubly Nothing (i:free) elems prevs nexts) = Just $ do
   MV.write elems i a
@@ -187,16 +193,16 @@ tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = Just $ do
 -- | Append an element to the end of the list. Grows the structure in
 -- case there are no free spaces.
 -- TODO: return index?
-snoc :: PrimMonad m => Doubly (PrimState m) a -> a ->
-                       m (Doubly (PrimState m) a)
+snoc :: (PrimMonad m, MVector v a) =>
+        Doubly v (PrimState m) a -> a -> m (Doubly v (PrimState m) a)
 snoc l a = fromMaybe (grow l (max 1 $ capacity l) >>= flip snoc a) $
            trySnoc l a
 
 -- | Try to append an element to the end of the list, if the capacity
 -- allows it.
 -- TODO: return index?
-trySnoc :: PrimMonad m => Doubly (PrimState m) a -> a ->
-                          Maybe (m (Doubly (PrimState m) a))
+trySnoc :: (PrimMonad m, MVector v a) =>
+           Doubly v (PrimState m) a -> a -> Maybe (m (Doubly v (PrimState m) a))
 trySnoc (Doubly _ [] _ _ _) _ = Nothing
 trySnoc (Doubly Nothing (i:free) elems nexts prevs) a = Just $ do
   MV.write elems i a
@@ -221,14 +227,16 @@ trySnoc (Doubly (Just i0) (i:free) elems nexts prevs) a = Just $ do
 {-# INLINABLE trySnoc #-}
 
 -- | Shift the list left by 1, placing the first element last
-shiftL :: PrimMonad m => Doubly (PrimState m) a -> m (Doubly (PrimState m) a)
+shiftL :: (PrimMonad m, MVector v a) =>
+          Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
 shiftL l@(Doubly Nothing _ _ _ _) = return l
 shiftL (Doubly (Just i0) free elems prevs nexts) = do
   i1 <- MV.read nexts i0
   return $ Doubly (Just i1) free elems prevs nexts
 
 -- | Shift the list right by 1, placing the last element first
-shiftR :: PrimMonad m => Doubly (PrimState m) a -> m (Doubly (PrimState m) a)
+shiftR :: (PrimMonad m, MVector v a) =>
+          Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
 shiftR l@(Doubly Nothing _ _ _ _) = return l
 shiftR (Doubly (Just i0) free elems prevs nexts) = do
   i_n <- MV.read prevs i0
