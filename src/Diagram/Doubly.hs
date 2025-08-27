@@ -12,12 +12,13 @@ import qualified Data.Vector.Strict as B
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 
+type Index = Int
 data Doubly s a = Doubly
-  !(Maybe Int)       -- ^ head index
-  ![Int]             -- ^ freed indexes
-  !(B.MVector s a)   -- ^ elements
-  !(U.MVector s Int) -- ^ previous indexes
-  !(U.MVector s Int) -- ^ next indexes
+  !(Maybe Index)       -- ^ head index
+  ![Index]             -- ^ freed indexes
+  !(B.MVector s a)     -- ^ elements
+  !(U.MVector s Index) -- ^ previous indexes
+  !(U.MVector s Index) -- ^ next indexes
 
 -- | Allocate a new list of the given size with undefined values
 new :: PrimMonad m => Int -> m (Doubly (PrimState m) a)
@@ -58,16 +59,10 @@ fromList as = do
   return $ Doubly (Just 0) [] elems prevs nexts
 
 -- | Read the doubly-linked list into a singly-linked list. Use toStream
--- to not @sequence@ the reads.
+-- to not @sequence@ the reads.Applicative
+-- TODO: return index-value pairs?
 toList :: PrimMonad m => Doubly (PrimState m) a -> m [a]
-toList (Doubly Nothing _ _ _ _) = return [] -- empty
-toList (Doubly (Just i0) _ elems _ nexts) = go i0
-  where
-    go i = do a <- MV.read elems i
-              nxt <- MV.read nexts i
-              if nxt == i0
-                then return [a] -- looped back
-                else (a:) <$> go nxt -- cont.
+toList = S.toList_ . toStream
 
 toStream :: PrimMonad m => Doubly (PrimState m) a -> Stream (Of a) m ()
 toStream (Doubly Nothing _ _ _ _) = return () -- empty
@@ -81,14 +76,7 @@ toStream (Doubly (Just i0) _ elems _ nexts) = go i0
 -- | Read the doubly-linked list into a singly-linked list in reverse
 -- order. Use toRevStream to not @sequence@ the reads.
 toRevList :: PrimMonad m => Doubly (PrimState m) a -> m [a]
-toRevList (Doubly Nothing _ _ _ _) = return [] -- empty
-toRevList (Doubly (Just i0) _ elems prevs _) = go i0
-  where
-    go i = do a <- MV.read elems i
-              prv <- MV.read prevs i
-              if prv == i0
-                then return [a] -- looped back
-                else (a:) <$> go prv -- cont.
+toRevList = S.toList_ . toStream
 
 toRevStream :: PrimMonad m => Doubly (PrimState m) a -> Stream (Of a) m ()
 toRevStream (Doubly Nothing _ _ _ _) = return () -- empty
@@ -99,26 +87,26 @@ toRevStream (Doubly (Just i0) _ elems prevs _) = go i0
               S.yield a
               when (prv /= i0) $ go prv -- cont.
 
-read :: PrimMonad m => Doubly (PrimState m) a -> Int -> m a
+read :: PrimMonad m => Doubly (PrimState m) a -> Index -> m a
 read (Doubly _ _ elems _ _) = MV.read elems
 
 -- | Return the index of the element preceeding the element at a given
 -- index in the list
-prev :: PrimMonad m => Doubly (PrimState m) a -> Int -> m Int
+prev :: PrimMonad m => Doubly (PrimState m) a -> Index -> m Int
 prev (Doubly _ _ _ _ prevs) = MV.read prevs
 
 -- | Return the index of the element following the element at a given
 -- index in the list
-next :: PrimMonad m => Doubly (PrimState m) a -> Int -> m Int
+next :: PrimMonad m => Doubly (PrimState m) a -> Index -> m Int
 next (Doubly _ _ _ nexts _) = MV.read nexts
 
 -- | Modify an element at a given index. Throws an error if index is
 -- undefined
-modify :: PrimMonad m => Doubly (PrimState m) a -> (a -> a) -> Int -> m ()
+modify :: PrimMonad m => Doubly (PrimState m) a -> (a -> a) -> Index -> m ()
 modify (Doubly _ _ elems _ _) = MV.modify elems
 
 -- | Delete the element at a given index and seam previous with next.
-delete :: PrimMonad m => Doubly (PrimState m) a -> Int ->
+delete :: PrimMonad m => Doubly (PrimState m) a -> Index ->
                          m (Doubly (PrimState m) a)
 delete l@(Doubly Nothing _ _ _ _) _ = return l -- empty ==> empty
 delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
@@ -133,6 +121,7 @@ delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
 
 -- | Append an element at the begining of the list. Grows the structure
 -- in case there are no free spaces.
+-- TODO: return index?
 cons :: PrimMonad m => a -> Doubly (PrimState m) a ->
                        m (Doubly (PrimState m) a)
 cons a l = fromMaybe (grow l (max 1 $ capacity l) >>= cons a) $
@@ -140,6 +129,7 @@ cons a l = fromMaybe (grow l (max 1 $ capacity l) >>= cons a) $
 
 -- | Try to append an element at the beginning of the list, if the
 -- capacity allows it.
+-- TODO: return index?
 tryCons :: PrimMonad m => a -> Doubly (PrimState m) a ->
                           Maybe (m (Doubly (PrimState m) a))
 tryCons _ (Doubly _ [] _ _ _) = Nothing
@@ -167,6 +157,7 @@ tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = Just $ do
 
 -- | Append an element to the end of the list. Grows the structure in
 -- case there are no free spaces.
+-- TODO: return index?
 snoc :: PrimMonad m => Doubly (PrimState m) a -> a ->
                        m (Doubly (PrimState m) a)
 snoc l a = fromMaybe (grow l (max 1 $ capacity l) >>= flip snoc a) $
@@ -174,6 +165,7 @@ snoc l a = fromMaybe (grow l (max 1 $ capacity l) >>= flip snoc a) $
 
 -- | Try to append an element to the end of the list, if the capacity
 -- allows it.
+-- TODO: return index?
 trySnoc :: PrimMonad m => Doubly (PrimState m) a -> a ->
                           Maybe (m (Doubly (PrimState m) a))
 trySnoc (Doubly _ [] _ _ _) _ = Nothing
