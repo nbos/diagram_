@@ -12,6 +12,7 @@ import Data.Word (Word8)
 import Data.Maybe
 import Data.Tuple.Extra
 import qualified Data.List as L
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
 import Data.Map.Strict (Map)
@@ -94,6 +95,9 @@ extension rs = go
     go s | s < 256 = [toEnum s]
          | otherwise = let (s0,s1) = rs V.! (s - 256)
                        in go s0 ++ go s1
+
+bytestring :: Rules -> Int -> ByteString
+bytestring = BS.pack .: extension
 
 -- | List the symbols that are constructive prefixes of the given
 -- symbol, from large to small, starting with the symbol itself and

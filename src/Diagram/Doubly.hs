@@ -44,7 +44,6 @@ grow (Doubly mi0 free elems nexts prevs) n = do
       len' = len + n
       free' = free ++ [len..len'-1]
   elems' <- MV.grow elems n
-  -- forM_ [len..len'-1] $ flip (MV.write elems') Nothing -- init.
   nexts' <- MV.grow nexts n
   prevs' <- MV.grow prevs n
   return $ Doubly mi0 free' elems' nexts' prevs'
