@@ -119,6 +119,35 @@ delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
              | otherwise  = mi0
     return $ Doubly mi0' (i:free) elems prevs nexts
 
+elemIndices :: (PrimMonad m, Eq a) => Doubly (PrimState m) a -> a ->
+                                      Stream (Of Index) m ()
+elemIndices (Doubly Nothing _ _ _ _) _ = return ()
+elemIndices (Doubly (Just i0) _ elems _ nexts) a = go i0
+  where
+    go i = do
+      a' <- lift $ MV.read elems i
+      when (a' == a) $ S.yield i
+      nxt <- lift $ MV.read nexts i
+      when (nxt /= i0) $ go nxt
+
+jointIndices :: (PrimMonad m, Eq a) => Doubly (PrimState m) a -> (a,a) ->
+                                       Stream (Of Index) m ()
+jointIndices (Doubly Nothing _ _ _ _) _ = return ()
+jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
+  where
+    go i = do
+      a <- lift $ MV.read elems i
+      nxt <- lift $ MV.read nexts i
+      when (nxt /= i0) $ do
+        if a == a0 then do
+          a' <- lift $ MV.read elems nxt -- read next
+          if a' == a1
+          then do S.yield i -- match!
+                  nxt' <- lift $ MV.read nexts nxt
+                  when (nxt' /= i0) $ go nxt'
+          else go nxt
+        else go nxt
+
 -- | Append an element at the begining of the list. Grows the structure
 -- in case there are no free spaces.
 -- TODO: return index?
