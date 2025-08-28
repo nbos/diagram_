@@ -31,15 +31,25 @@ new sz = do
 capacity :: MVector v a => Doubly v s a -> Int
 capacity (Doubly _ _ elems _ _) = MV.length elems
 
+null :: Doubly v s a -> Bool
+null (Doubly mi0 _ _ _ _) = isNothing mi0
+
 full :: Doubly v s a -> Bool
 full (Doubly _ [] _ _ _) = True
 full _ = False
 
+head :: Doubly v s a -> Maybe Index
+head (Doubly mi0 _ _ _ _) = mi0
+
+last :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe Index)
+last (Doubly Nothing _ _ _ _) = return Nothing
+last (Doubly (Just i0) _ _ prevs _) = Just <$> MV.read prevs i0
+
 -- | Clone the data in the given list into a new list with `n`
 -- additional free slots
-grow :: (PrimMonad m, MVector v a) =>
-        Doubly v (PrimState m) a -> Int -> m (Doubly v (PrimState m) a)
-grow (Doubly mi0 free elems nexts prevs) n = do
+growBy :: (PrimMonad m, MVector v a) =>
+          Int -> Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
+growBy n (Doubly mi0 free elems nexts prevs) = do
   let len = MV.length elems
       len' = len + n
       free' = free ++ [len..len'-1]
@@ -47,6 +57,11 @@ grow (Doubly mi0 free elems nexts prevs) n = do
   nexts' <- MV.grow nexts n
   prevs' <- MV.grow prevs n
   return $ Doubly mi0 free' elems' nexts' prevs'
+
+-- | Double the capacity of the list
+grow :: (PrimMonad m, MVector v a) =>
+          Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
+grow l = growBy (max 1 $ capacity l) l
 
 -- | Construct a doubly-linked list from a singly-linked list
 fromList :: (PrimMonad m, MVector v a) => [a] -> m (Doubly v (PrimState m) a)
@@ -158,22 +173,21 @@ jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
 -- TODO: return index?
 cons :: (PrimMonad m, MVector v a) =>
         a -> Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
-cons a l = fromMaybe (grow l (max 1 $ capacity l) >>= cons a) $
-           tryCons a l
+cons a l = tryCons a l >>= maybe (grow l >>= cons a) return
 
 -- | Try to append an element at the beginning of the list, if the
 -- capacity allows it.
 -- TODO: return index?
 tryCons :: (PrimMonad m, MVector v a) =>
-           a -> Doubly v (PrimState m) a -> Maybe (m (Doubly v (PrimState m) a))
-tryCons _ (Doubly _ [] _ _ _) = Nothing
-tryCons a (Doubly Nothing (i:free) elems prevs nexts) = Just $ do
+           a -> Doubly v (PrimState m) a -> m (Maybe (Doubly v (PrimState m) a))
+tryCons _ (Doubly _ [] _ _ _) = return Nothing
+tryCons a (Doubly Nothing (i:free) elems prevs nexts) = do
   MV.write elems i a
   MV.write nexts i i
   MV.write prevs i i
-  return $ Doubly (Just i) free elems prevs nexts
+  return $ Just $ Doubly (Just i) free elems prevs nexts
 
-tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = Just $ do
+tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = do
   -- i0 (old head)
   i_n <- MV.read prevs i0 -- get last
   MV.write prevs i0 i
@@ -186,7 +200,7 @@ tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = Just $ do
   MV.write prevs i i_n
   MV.write nexts i i0
 
-  return $ Doubly (Just i) free elems prevs nexts
+  return $ Just $ Doubly (Just i) free elems prevs nexts
 {-# INLINABLE tryCons #-}
 
 -- | Append an element to the end of the list. Grows the structure in
@@ -194,22 +208,21 @@ tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = Just $ do
 -- TODO: return index?
 snoc :: (PrimMonad m, MVector v a) =>
         Doubly v (PrimState m) a -> a -> m (Doubly v (PrimState m) a)
-snoc l a = fromMaybe (grow l (max 1 $ capacity l) >>= flip snoc a) $
-           trySnoc l a
+snoc l a = trySnoc l a >>= maybe (grow l >>= flip snoc a) return
 
 -- | Try to append an element to the end of the list, if the capacity
 -- allows it.
 -- TODO: return index?
 trySnoc :: (PrimMonad m, MVector v a) =>
-           Doubly v (PrimState m) a -> a -> Maybe (m (Doubly v (PrimState m) a))
-trySnoc (Doubly _ [] _ _ _) _ = Nothing
-trySnoc (Doubly Nothing (i:free) elems nexts prevs) a = Just $ do
+           Doubly v (PrimState m) a -> a -> m (Maybe (Doubly v (PrimState m) a))
+trySnoc (Doubly _ [] _ _ _) _ = return Nothing
+trySnoc (Doubly Nothing (i:free) elems nexts prevs) a = do
   MV.write elems i a
   MV.write nexts i i
   MV.write prevs i i
-  return $ Doubly (Just i) free elems nexts prevs
+  return $ Just $ Doubly (Just i) free elems nexts prevs
 
-trySnoc (Doubly (Just i0) (i:free) elems nexts prevs) a = Just $ do
+trySnoc (Doubly (Just i0) (i:free) elems nexts prevs) a = do
   -- i0 (head)
   i_n <- MV.read prevs i0 -- get last
   MV.write prevs i0 i
@@ -222,7 +235,7 @@ trySnoc (Doubly (Just i0) (i:free) elems nexts prevs) a = Just $ do
   MV.write prevs i i_n
   MV.write nexts i i0
 
-  return $ Doubly (Just i0) free elems nexts prevs
+  return $ Just $ Doubly (Just i0) free elems nexts prevs
 {-# INLINABLE trySnoc #-}
 
 -- | Shift the list left by 1, placing the first element last

@@ -183,18 +183,17 @@ revReduce rs rsm = go
     go [] s1 = [s1]
     go (s0:bwd) s1
       | null constrs = s1:s0:bwd
-      | otherwise = let s01 = minimum constrs
-                        recip01 = lRecip rs s0 (fst $ rs ! s01)
-                        bwd' = L.foldl' go bwd recip01
-                    in go bwd' s01
+      | otherwise = flip go s01 $ L.foldl' go bwd recip01
       where
+        s01 = minimum constrs
+        recip01 = lRecip rs s0 (fst $ rs ! s01)
         constrs = catMaybes $
                   -- check for a construction between s0 and s1, and
                   (M.lookup (s0,s1) rsm :) $
                   -- check for a construction overriding one in s0...
-                  fmap (\suf0 -> do let (_,r0) = rs ! suf0
-                                    s01 <- M.lookup (r0,s1) rsm
-                                    nothingIf (>= suf0) s01) $
+                  fmap (\suf0 -> let (_,r0) = rs ! suf0
+                                 in M.lookup (r0,s1) rsm
+                                    >>= nothingIf (>= suf0)) $
                   -- ...over composite suffixes of s0
                   init $ suffixes rs s0
 
