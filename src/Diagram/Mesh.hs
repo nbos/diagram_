@@ -33,23 +33,37 @@ type Doubly s = D.Doubly MVector s Sym
 -- MESH --
 ----------
 
-data Mesh s = Mesh
-  !Model               -- ^ String's model :: (rs,n,ks)
-  !(Doubly s)          -- ^ Fixed size underlying string :: [Int]
-  !(Doubly s)          -- ^ Right buffer of partial constructions :: [Int]
-  !(Map (Sym,Sym) Sym) -- ^ Forward rules :: (s0,s1) -> s01
-  !(Trie ())           -- ^ Extensions of all symbols :: Set ByteString
-  !(Map (Sym,Sym) Int) -- ^ Joint counts (candidates) :: (s0,s1) -> n01
+data Mesh s = Mesh {
+  model :: !Model, -- ^ String's model :: (rs,n,ks)
+  string :: !(Doubly s), -- ^ Fixed size underlying string
+  parity :: !Bool,  -- ^ Number of times last symbol is repeated
+  buffer :: !(Doubly s), -- ^ Right buffer of partial constructions
+  fwdRules :: !(Map (Sym,Sym) Sym), -- ^ Forward rules
+  extTrie :: !(Trie ()), -- ^ Extensions of all symbols
+  candidates :: !(Map (Sym,Sym) Int) -- ^ Joint counts (candidates)
+}
 
 full :: Mesh s -> Bool
-full (Mesh _ ss _ _ _ _) = D.full ss
+full (Mesh _ ss _ _ _ _ _) = D.full ss
+
+checkParity :: PrimMonad m => Doubly (PrimState m) -> m Bool
+checkParity ss = (S.next (D.toRevStream ss) >>=) $ \case
+  Left () -> return False
+  Right (sn, revRest) -> even <$> S.length_ (S.takeWhile (== sn) revRest)
 
 -- | Construction
 fromList :: PrimMonad m => Rules -> [Sym] -> m (Mesh (PrimState m))
 fromList rs l = do
   ss <- D.fromList l
+
+  -- check parity of end of `ss`
+  par <- (S.next (D.toRevStream ss) >>=) $ \case
+    Left () -> return False
+    Right (sn, revRest) ->
+      even <$> S.length_ (S.takeWhile (== sn) revRest)
+
   buf <- D.new 10 -- could be bigger
-  return $ Mesh mdl ss buf rsm trie cdts
+  return $ Mesh mdl ss par buf rsm trie cdts
   where
     numSymbols = R.numSymbols rs
     mdl = Mdl.fromSymbols rs l
@@ -62,20 +76,21 @@ fromList rs l = do
 -- by loss, lowest first, with count.
 -- TODO: bookkeep
 sortCandidates :: Mesh s -> Double -> [(Double,((Sym,Sym),Int))]
-sortCandidates (Mesh mdl _ _ _ _ cdts) scale =
+sortCandidates (Mesh mdl _ _ _ _ _ cdts) scale =
   L.sort $ withLoss <$> M.toList cdts
   where
     withLoss = toFst $ uncurry $ Mdl.scaledInfoDelta scale mdl
 
 -- | Add a rule, rewrite
 pushRule :: PrimMonad m => Mesh (PrimState m) -> (Sym,Sym) ->
-                           m (Mesh (PrimState m))
-pushRule (Mesh mdl ss buf rsm trie cdts) (s0,s1) = do
+                           m (Int, Mesh (PrimState m))
+pushRule (Mesh mdl ss _ buf rsm trie cdts) (s0,s1) = do
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
          D.jointIndices ss (s0,s1)
+  par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
-  return $ Mesh mdl' ss' buf' rsm' trie' cdts'
+  return (s01, Mesh mdl' ss' par' buf' rsm' trie' cdts')
   where
     err = error $ "not a candidate: " ++ show (s0,s1)
     (n01,cdts') = first (fromMaybe err) $
@@ -89,16 +104,18 @@ pushRule (Mesh mdl ss buf rsm trie cdts) (s0,s1) = do
 -- not the prefix of any potential symbol, append the fully constructed
 -- symbols at the head of the buffer to the end of the symbol string
 flush :: PrimMonad m => Mesh (PrimState m) -> m (Mesh (PrimState m))
-flush msh@(Mesh mdl@(Model rs _ _) ss0 buf0 rsm trie cdts)
+flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie cdts0)
   | D.full ss0 = return msh
-  | otherwise = go ss0 buf0
-                . BS.pack
-                . concatMap (R.extension rs)
-                =<< D.toList buf0
+  | otherwise = do
+      sn0 <- fromMaybe minBound <$> D.last ss0 -- minBound hacky but w/e
+      go ss0 par0 buf0 cdts0 sn0
+        . BS.pack
+        . concatMap (R.extension rs)
+        =<< D.toList buf0
   where
-    go ss buf bs
+    go !ss !par !buf !cdts !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
-          return $ Mesh mdl ss buf rsm trie cdts -- end
+          return $ Mesh mdl ss par buf rsm trie cdts -- end
       | otherwise = do
           let i = fromJust $ D.head buf
           s <- D.read buf i
@@ -106,16 +123,19 @@ flush msh@(Mesh mdl@(Model rs _ _) ss0 buf0 rsm trie cdts)
           buf' <- D.delete buf i
           let len = R.symbolLength rs s
               bs' = BS.drop len bs
-          go ss' buf' bs'
+              par' = s /= sn || not par -- if s == sn then not par else True
+              cdts' | s == sn && not par = cdts
+                    | otherwise = M.insertWith (+) (sn,s) 1 cdts
+          go ss' par' buf' cdts' s bs'
       where
         exts = Trie.keys $ Trie.submap bs trie
         prefixing = not (null exts || exts == [bs])
 
 snoc :: forall m. PrimMonad m =>
         Mesh (PrimState m) -> Sym -> m (Mesh (PrimState m))
-snoc (Mesh mdl@(Model rs _ _) ss buf0 rsm trie cdts) s = do
+snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _) s = do
   buf <- go buf0 s
-  flush $ Mesh mdl ss buf rsm trie cdts
+  flush $ msh{ buffer = buf }
   where
     go :: Doubly (PrimState m) -> Int -> m (Doubly (PrimState m))
     go buf s1 = (D.last buf >>=) $ \case
