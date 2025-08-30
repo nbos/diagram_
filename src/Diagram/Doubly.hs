@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 -- | Doubly-linked list with random access
 module Diagram.Doubly (module Diagram.Doubly) where
 
@@ -72,6 +73,22 @@ fromList as = do
   prevs <- U.unsafeThaw (U.fromList ((len-1):[0..len-2]))
   nexts <- U.unsafeThaw (U.fromList ([1..len-1]++[0]))
   return $ Doubly (Just 0) [] elems prevs nexts
+
+-- | Construct a doubly-linked list from a stream of at most `n`
+-- elements
+fromStream :: (PrimMonad m, MVector v a) => Int -> Stream (Of a) m r ->
+              m (Doubly v (PrimState m) a, r)
+fromStream n ss = do
+  elems <- MV.new n
+  rest <- S.effects $ S.mapM (uncurry $ MV.write elems) $
+          S.zip (S.enumFrom 0) $
+          S.splitAt n ss
+  prevs <- U.unsafeThaw (U.fromList ((n-1):[0..n-2]))
+  nexts <- U.unsafeThaw (U.fromList ([1..n-1]++[0]))
+  (<$> S.next rest) $ \case
+    Left r -> (Doubly (Just 0) [] elems prevs nexts, r)
+    Right _ -> error $ "Doubly.fromStream: Given stream contains more than "
+               ++ show n ++ " elements"
 
 -- | Read the doubly-linked list into a singly-linked list. Use toStream
 -- to not @sequence@ the reads.Applicative

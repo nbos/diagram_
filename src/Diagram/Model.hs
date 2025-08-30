@@ -51,15 +51,15 @@ addCounts (Model rs n ks) ss = runST $ do
   return $ Model rs n' ks'
 
 -- | Reconstruction from rule set and symbol string
-fromSymbols :: Rules -> [Int] -> Model
-fromSymbols rs ss = runST $ do
-  mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) (0 :: Int)
+fromList :: Rules -> [Int] -> Model
+fromList rs ss = runST $ do
+  mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
   forM_ ss $ MV.modify mks (+1)
   ks <- U.unsafeFreeze mks
   return $ Model rs (V.sum ks) ks
 
-fromSymbolsM :: PrimMonad m => Rules -> Stream (Of Int) m r -> m (Model, r)
-fromSymbolsM rs ss = do
+fromStream :: PrimMonad m => Rules -> Stream (Of Int) m r -> m (Model, r)
+fromStream rs ss = do
   mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
   r <- S.effects $ S.mapM (MV.modify mks (+1)) ss
   ks <- U.unsafeFreeze mks
@@ -71,7 +71,7 @@ pushRule (Model rs n ks) (s0,s1) n01 = (s01, Model rs' n' ks')
     (s01,rs') = R.pushRule (s0,s1) rs
     n' = n - n01
     ks' = runST $ do
-      mutks <- V.unsafeThaw $ V.snoc ks n01
+      mutks <- V.unsafeThaw $ V.snoc ks n01 -- O(n) snoc
       forM_ [s0,s1] $ MV.modify mutks (+(-n01))
       V.unsafeFreeze mutks
 

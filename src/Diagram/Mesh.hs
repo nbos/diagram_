@@ -3,7 +3,7 @@
 module Diagram.Mesh (module Diagram.Mesh) where
 
 import Control.Monad
-import Control.Monad.Primitive (PrimMonad(PrimState))
+import Control.Monad.Primitive
 
 import Data.Maybe
 import Data.Bifunctor
@@ -13,10 +13,11 @@ import qualified Data.Map.Strict as M
 import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 import qualified Data.ByteString as BS
-
 import Data.Vector.Unboxed.Mutable (MVector)
 
+import Streaming
 import qualified Streaming.Prelude as S
+import Diagram.Streaming ()
 
 import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
@@ -66,11 +67,34 @@ fromList rs l = do
   return $ Mesh mdl ss par buf rsm trie cdts
   where
     numSymbols = R.numSymbols rs
-    mdl = Mdl.fromSymbols rs l
+    mdl = Mdl.fromList rs l
     rsm = R.toMap rs
     trie = Trie.fromList $
            (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
     cdts = countJoints l
+
+-- | Construction from a stream of size at most `n`
+fromStream :: PrimMonad m => Rules -> Int -> Stream (Of Sym) m r ->
+                             m (Mesh (PrimState m), r)
+fromStream rs n str = do
+  (ss,(mdl,(cdts,r))) <- D.fromStream n $
+                         Mdl.fromStream rs $ S.copy $
+                         countJointsM $ S.copy str
+
+  -- check parity of end of `ss`
+  par <- (S.next (D.toRevStream ss) >>=) $ \case
+    Left () -> return False
+    Right (sn, revRest) ->
+      even <$> S.length_ (S.takeWhile (== sn) revRest)
+
+  buf <- D.new 10 -- could be bigger
+  return (Mesh mdl ss par buf rsm trie cdts, r)
+
+  where
+    numSymbols = R.numSymbols rs
+    rsm = R.toMap rs
+    trie = Trie.fromList $
+           (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
 
 -- | Compute the loss for each candidate joint and return joints ordered
 -- by loss, lowest first, with count.
@@ -180,3 +204,20 @@ countJoints_ !m s0 (s1:s2:ss)
   | s0 == s1 && s1 == s2 = countJoints_ m' s2 ss
   | otherwise = countJoints_ m' s1 (s2:ss)
   where m' = M.insertWith (+) (s0,s1) 1 m
+
+countJointsM :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
+countJointsM = countJointsM_ M.empty
+
+countJointsM_ :: Monad m => Map (Int,Int) Int -> Stream (Of Int) m r ->
+                            m (Map (Int,Int) Int, r)
+countJointsM_ m0 ss0 = (S.next ss0 >>=) $ \case
+  Left r -> return (m0, r)
+  Right (s0,ss0') -> go m0 s0 ss0'
+  where
+    go !m s0 ss = (S.next ss >>=) $ \case
+      Left r -> return (m,r) -- end
+      Right (s1,ss') -> (S.next ss' >>=) $ \case
+        Left r -> return (m', r) -- last joint
+        Right (s2,_) | s0 == s1 && s1 == s2 -> countJointsM_ m' ss' -- even
+                     | otherwise -> go m' s1 ss' -- odd
+        where m' = M.insertWith (+) (s0,s1) 1 m

@@ -1,10 +1,19 @@
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 module Diagram.Streaming (module Diagram.Streaming) where
 
+import Control.Monad.Primitive
 import Streaming
 import qualified Streaming.Prelude as S
 import Data.Maybe
 
 import Diagram.Util
+
+instance PrimMonad m => PrimMonad (Stream (Of a) m) where
+  type PrimState (Stream (Of a) m) = PrimState m
+  primitive = lift . primitive
 
 -- | Return the return values of the streams if they are equal, Nothing
 -- if they are not
