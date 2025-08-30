@@ -2,15 +2,17 @@ module Diagram.Model (module Diagram.Model) where
 
 import Control.Monad.ST
 import Control.Monad
+import Control.Monad.Primitive (PrimMonad)
 
 import Data.STRef
 import Data.Bifunctor
-import qualified Data.List as L
-import qualified Data.IntMap.Strict as IM
 
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as MV
+
+import Streaming
+import qualified Streaming.Prelude as S
 
 import qualified Codec.Elias as Elias
 import qualified Codec.Arithmetic.Combinatorics as Comb
@@ -50,12 +52,18 @@ addCounts (Model rs n ks) ss = runST $ do
 
 -- | Reconstruction from rule set and symbol string
 fromSymbols :: Rules -> [Int] -> Model
-fromSymbols rs ss = Model rs n ks
-  where
-    im = L.foldl' (\m k -> IM.insertWith (+) k 1 m) IM.empty ss
-    n = sum im
-    ks = V.replicate (R.numSymbols rs) 0
-         V.// IM.toList im -- write
+fromSymbols rs ss = runST $ do
+  mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) (0 :: Int)
+  forM_ ss $ MV.modify mks (+1)
+  ks <- U.unsafeFreeze mks
+  return $ Model rs (V.sum ks) ks
+
+fromSymbolsM :: PrimMonad m => Rules -> Stream (Of Int) m r -> m (Model, r)
+fromSymbolsM rs ss = do
+  mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
+  r <- S.effects $ S.mapM (MV.modify mks (+1)) ss
+  ks <- U.unsafeFreeze mks
+  return (Model rs (V.sum ks) ks, r)
 
 pushRule :: Model -> (Int,Int) -> Int -> (Int, Model)
 pushRule (Model rs n ks) (s0,s1) n01 = (s01, Model rs' n' ks')
