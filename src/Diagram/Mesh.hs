@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections, BangPatterns, LambdaCase #-}
+{-# LANGUAGE TupleSections, BangPatterns, LambdaCase, TypeApplications #-}
 module Diagram.Mesh (module Diagram.Mesh) where
 
 import Control.Monad
@@ -13,11 +13,15 @@ import qualified Data.Map.Strict as M
 import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 import qualified Data.ByteString as BS
-import Data.Vector.Unboxed.Mutable (MVector)
 
-import Streaming
+import qualified Data.Vector.Strict as B
+import qualified Data.Vector.Unboxed as U
+import Data.Vector.Unboxed.Mutable (MVector)
+import qualified Data.Vector.Generic.Mutable as MV
+
+import Streaming as S
 import qualified Streaming.Prelude as S
-import Diagram.Streaming ()
+import Diagram.Streaming () -- PrimMonad Stream instance
 
 import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
@@ -25,6 +29,7 @@ import Diagram.Rules (Rules)
 import qualified Diagram.Rules as R
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Mdl
+import Diagram.Progress
 import Diagram.Util
 
 type Sym = Int -- symbol
@@ -34,6 +39,7 @@ type Doubly s = D.Doubly MVector s Sym
 -- MESH --
 ----------
 
+-- | Symbol string with all our bookkeeping
 data Mesh s = Mesh {
   model :: !Model, -- ^ String's model :: (rs,n,ks)
   string :: !(Doubly s), -- ^ Fixed size underlying string
@@ -105,20 +111,29 @@ sortCandidates (Mesh mdl _ _ _ _ _ cdts) scale =
   where
     withLoss = toFst $ uncurry $ Mdl.scaledInfoDelta scale mdl
 
--- | Add a rule, rewrite
-pushRule :: PrimMonad m => Mesh (PrimState m) -> (Sym,Sym) ->
-                           m (Int, Mesh (PrimState m))
+-- | Add a rule, rewrite, with progress bars
+pushRule :: (PrimMonad m, MonadIO m) =>
+            Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
 pushRule (Mesh mdl ss _ buf rsm trie cdts) (s0,s1) = do
+  i01s <- S.toList_ $ D.jointIndices ss (s0,s1)
+
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
-         D.jointIndices ss (s0,s1)
+         withPB n01 (here "Substituting in new symbol") $
+         S.each i01s
+
+  (m,_) <- recountM ss' (s0,s1) s01 $
+           withPB n01 (here "Computing delta of joint counts") $
+           S.each i01s
+
   par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
+  let cdts' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id cdts m
   return (s01, Mesh mdl' ss' par' buf' rsm' trie' cdts')
   where
+    here = (++) (" [" ++ show s01 ++ "]: ")
     err = error $ "not a candidate: " ++ show (s0,s1)
-    (n01,cdts') = first (fromMaybe err) $
-                  M.updateLookupWithKey (\_ _ -> Nothing) (s0,s1) cdts
+    n01 = fromMaybe err $ M.lookup (s0,s1) cdts
     (s01, mdl'@(Model rs' _ _)) = Mdl.pushRule mdl (s0,s1) n01
     bs01 = R.bytestring rs' s01
     trie' = Trie.insert bs01 () trie
@@ -221,3 +236,80 @@ countJointsM_ m0 ss0 = (S.next ss0 >>=) $ \case
         Right (s2,_) | s0 == s1 && s1 == s2 -> countJointsM_ m' ss' -- even
                      | otherwise -> go m' s1 ss' -- odd
         where m' = M.insertWith (+) (s0,s1) 1 m
+
+recountM :: forall m r. PrimMonad m => Doubly (PrimState m) -> (Int,Int) -> Int ->
+            Stream (Of Int) m r -> m (Map (Int, Int) Int, r)
+recountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, ) <$> S.effects is0
+recountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
+  s0s1ref <- newPrimRef @U.MVector (0 :: Int) -- (s0,s1) (-) (redundant)
+  s1s0ref <- newPrimRef @U.MVector (0 :: Int) -- (s1,s0) (-)
+  prevvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (i,s01) (-/+)
+  nextvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (s01,i) (-/+)
+  s0s0ref <- newPrimRef @U.MVector (0 :: Int) -- (s0,s0) (+) (prev correction)
+  s1s1ref <- newPrimRef @U.MVector (0 :: Int) -- (s1,s1) (+) (next correction)
+  autoref <- newPrimRef @U.MVector (0 :: Int) -- (s01,s01) (+)
+
+  -- <loop>
+  r <- case () of
+    _ -> go is0 where
+      go :: Stream (Of Index) m r -> m r
+      go is = (S.next is >>=) $ \case
+        Left r -> return r -- end
+        Right (i,is') -> do
+          -- prev
+          when (i /= i0) $ do
+            iprev <- D.prev ss i
+            prev <- D.read ss iprev
+            MV.modify prevvec (+1) prev
+            when (prev == s0) $ do -- s0 /= s1
+              n0 <- (+1) <$> S.length_ ( S.break (/= s0) $
+                                         D.toRevStreamFrom ss iprev )
+              when (odd n0) $ modifyPrimRef s0s0ref (+1) -- correct
+
+          -- s0s1's
+          n <- S.length_ $ S.break (/= s01) $ D.toStreamFrom ss i
+          modifyPrimRef s0s1ref (+n)
+          when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
+          modifyPrimRef autoref (+(n `div` 2))
+
+          -- next
+          (S.next (S.drop (n-1) $ S.yield i >> is') >>=) $ \case
+            Left r -> return r -- nothing after, end
+            Right (i',is'') -> do
+              inext <- D.next ss i'
+              when (inext /= i0) $ do
+                next <- D.read ss inext
+                MV.modify nextvec (+1) next
+                when (next == s1) $ do
+                  if s0 == s1 then modifyPrimRef s1s1ref (+1) -- even nnext
+                    else do
+                    nnext <- (+1) <$> S.length_ ( S.break (/= next) $
+                                                  D.toStreamFrom ss inext)
+                    when (odd nnext) $ modifyPrimRef s1s1ref (+1)
+              go is'' -- continue
+  -- </loop>
+
+  resref <- newPrimRef @B.MVector M.empty
+  let insert k n = when (n /= 0) $ modifyPrimRef resref $ M.insertWith (+) k n
+
+  -- read --
+  insert (s0,s1) . (0-) =<< readPrimRef s0s1ref -- (-)
+  insert (s1,s0) . (0-) =<< readPrimRef s1s0ref -- (-)
+  MV.iforM_ prevvec $ \prev n -> insert (prev,s0) (-n)  -- (-)
+                                 >> insert (prev,s01) n -- (+)
+  MV.iforM_ nextvec $ \next n -> insert (s1,next) (-n)  -- (-)
+                                 >> insert (s01,next) n -- (+)
+  insert (s0,s0) =<< readPrimRef s0s0ref   -- (+)
+  insert (s1,s1) =<< readPrimRef s1s1ref   -- (+)
+  insert (s01,s01) =<< readPrimRef autoref -- (+)
+
+  -- end --
+  (,r) <$> readPrimRef resref
+
+  where
+    newPrimRef :: MV.MVector v a => a -> m (v (PrimState m) a)
+    newPrimRef = MV.replicate 1
+    modifyPrimRef :: MV.MVector v a => v (PrimState m) a -> (a -> a) -> m ()
+    modifyPrimRef v f = MV.modify v f 0 -- TODO: unsafe
+    readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
+    readPrimRef = flip MV.read 0 -- TODO: unsafe

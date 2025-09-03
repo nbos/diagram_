@@ -46,6 +46,16 @@ last :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe Index
 last (Doubly Nothing _ _ _ _) = return Nothing
 last (Doubly (Just i0) _ _ prevs _) = Just <$> MV.read prevs i0
 
+(!) :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> m a
+(!) (Doubly _ _ elems _ _) = MV.read elems
+infixl 9 !
+
+read :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> m a
+read (Doubly _ _ elems _ _) = MV.read elems
+
+write :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> a -> m ()
+write (Doubly _ _ elems _ _) = MV.write elems
+
 -- | Clone the data in the given list into a new list with `n`
 -- additional free slots
 growBy :: (PrimMonad m, MVector v a) =>
@@ -61,7 +71,7 @@ growBy n (Doubly mi0 free elems nexts prevs) = do
 
 -- | Double the capacity of the list
 grow :: (PrimMonad m, MVector v a) =>
-          Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
+        Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
 grow l = growBy (max 1 $ capacity l) l
 
 -- | Construct a doubly-linked list from a singly-linked list
@@ -78,11 +88,11 @@ fromList as = do
 -- elements
 fromStream :: (PrimMonad m, MVector v a) => Int -> Stream (Of a) m r ->
               m (Doubly v (PrimState m) a, r)
-fromStream n ss = do
+fromStream n str = do
   elems <- MV.new n
   rest <- S.effects $ S.mapM (uncurry $ MV.write elems) $
           S.zip (S.enumFrom 0) $
-          S.splitAt n ss
+          S.splitAt n str
   prevs <- U.unsafeThaw (U.fromList ((n-1):[0..n-2]))
   nexts <- U.unsafeThaw (U.fromList ([1..n-1]++[0]))
   (<$> S.next rest) $ \case
@@ -99,7 +109,12 @@ toList = S.toList_ . toStream
 toStream :: (PrimMonad m, MVector v a) =>
             Doubly v (PrimState m) a -> Stream (Of a) m ()
 toStream (Doubly Nothing _ _ _ _) = return () -- empty
-toStream (Doubly (Just i0) _ elems _ nexts) = go i0
+toStream l@(Doubly (Just i0) _ _ _ _) = toStreamFrom l i0
+
+toStreamFrom :: (PrimMonad m, MVector v a) =>
+                Doubly v (PrimState m) a -> Int -> Stream (Of a) m ()
+toStreamFrom (Doubly Nothing _ _ _ _) = error "Doubly.toStreamFrom: empty list"
+toStreamFrom (Doubly (Just i0) _ elems _ nexts) = go
   where
     go i = do a <- lift $ MV.read elems i
               nxt <- lift $ MV.read nexts i
@@ -109,20 +124,24 @@ toStream (Doubly (Just i0) _ elems _ nexts) = go i0
 -- | Read the doubly-linked list into a singly-linked list in reverse
 -- order. Use toRevStream to not @sequence@ the reads.
 toRevList :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m [a]
-toRevList = S.toList_ . toStream
+toRevList = S.toList_ . toRevStream
 
 toRevStream :: (PrimMonad m, MVector v a) =>
                Doubly v (PrimState m) a -> Stream (Of a) m ()
 toRevStream (Doubly Nothing _ _ _ _) = return () -- empty
-toRevStream (Doubly (Just i0) _ elems prevs _) = go i0
+toRevStream l@(Doubly (Just i0) _ _ prevs _) = lift (MV.read prevs i0)
+                                               >>= toRevStreamFrom l
+
+toRevStreamFrom :: (PrimMonad m, MVector v a) =>
+                   Doubly v (PrimState m) a -> Int -> Stream (Of a) m ()
+toRevStreamFrom (Doubly Nothing _ _ _ _) =
+  error "Doubly.toRevStreamFrom: empty list"
+toRevStreamFrom (Doubly (Just i0) _ elems prevs _) = go
   where
     go i = do a <- lift $ MV.read elems i
               prv <- lift $ MV.read prevs i
               S.yield a
               when (prv /= i0) $ go prv -- cont.
-
-read :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> m a
-read (Doubly _ _ elems _ _) = MV.read elems
 
 -- | Return the index of the element preceeding the element at a given
 -- index in the list
