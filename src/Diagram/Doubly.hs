@@ -170,7 +170,7 @@ delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
     nxt <- MV.read nexts i --         i -> next
     MV.write prevs nxt prv -- prev <-( )-- next
     MV.write nexts prv nxt -- prev --( )-> next
-    let mi0' | prv == nxt = Nothing -- singleton ==> empty
+    let mi0' | i   == nxt = Nothing -- singleton ==> empty
              | i   == i0  = Just nxt
              | otherwise  = mi0
     return $ Doubly mi0' (i:free) elems prevs nexts
