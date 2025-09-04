@@ -60,14 +60,14 @@ write (Doubly _ _ elems _ _) = MV.write elems
 -- additional free slots
 growBy :: (PrimMonad m, MVector v a) =>
           Int -> Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
-growBy n (Doubly mi0 free elems nexts prevs) = do
+growBy n (Doubly mi0 free elems prevs nexts) = do
   let len = MV.length elems
       len' = len + n
       free' = free ++ [len..len'-1]
   elems' <- MV.grow elems n
   nexts' <- MV.grow nexts n
   prevs' <- MV.grow prevs n
-  return $ Doubly mi0 free' elems' nexts' prevs'
+  return $ Doubly mi0 free' elems' prevs' nexts'
 
 -- | Double the capacity of the list
 grow :: (PrimMonad m, MVector v a) =>
@@ -147,13 +147,13 @@ toRevStreamFrom (Doubly (Just i0) _ elems prevs _) = go
 -- index in the list
 prev :: (PrimMonad m, MVector v a) =>
         Doubly v (PrimState m) a -> Index -> m Index
-prev (Doubly _ _ _ _ prevs) = MV.read prevs
+prev (Doubly _ _ _ prevs _) = MV.read prevs
 
 -- | Return the index of the element following the element at a given
 -- index in the list
 next :: (PrimMonad m, MVector v a) =>
         Doubly v (PrimState m) a -> Index -> m Index
-next (Doubly _ _ _ nexts _) = MV.read nexts
+next (Doubly _ _ _ _ nexts) = MV.read nexts
 
 -- | Modify an element at a given index. Throws an error if index is
 -- undefined
@@ -252,13 +252,13 @@ snoc l a = trySnoc l a >>= maybe (grow l >>= flip snoc a) return
 trySnoc :: (PrimMonad m, MVector v a) =>
            Doubly v (PrimState m) a -> a -> m (Maybe (Doubly v (PrimState m) a))
 trySnoc (Doubly _ [] _ _ _) _ = return Nothing
-trySnoc (Doubly Nothing (i:free) elems nexts prevs) a = do
+trySnoc (Doubly Nothing (i:free) elems prevs nexts) a = do
   MV.write elems i a
   MV.write nexts i i
   MV.write prevs i i
-  return $ Just $ Doubly (Just i) free elems nexts prevs
+  return $ Just $ Doubly (Just i) free elems prevs nexts
 
-trySnoc (Doubly (Just i0) (i:free) elems nexts prevs) a = do
+trySnoc (Doubly (Just i0) (i:free) elems prevs nexts) a = do
   -- i0 (head)
   i_n <- MV.read prevs i0 -- get last
   MV.write prevs i0 i
@@ -271,7 +271,7 @@ trySnoc (Doubly (Just i0) (i:free) elems nexts prevs) a = do
   MV.write prevs i i_n
   MV.write nexts i i0
 
-  return $ Just $ Doubly (Just i0) free elems nexts prevs
+  return $ Just $ Doubly (Just i0) free elems prevs nexts
 {-# INLINABLE trySnoc #-}
 
 -- | Shift the list left by 1, placing the first element last
