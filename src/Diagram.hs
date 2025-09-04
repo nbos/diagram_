@@ -15,14 +15,10 @@ import Control.Monad.Primitive
 
 import Text.Printf
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
-import Data.Maybe
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.IntMap.Strict as IM
-import qualified Data.ByteString as BS
-import Data.Trie (Trie)
-import qualified Data.Trie as Trie
 
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Unboxed as U
@@ -38,29 +34,20 @@ import qualified Codec.Elias.Natural as Elias
 import qualified Codec.Arithmetic.Combinatorics as Comb
 import qualified Codec.Arithmetic.Variety.BitVec as BV
 
+import Diagram.Information
 import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
 import qualified Diagram.Rules as R
+import qualified Diagram.Doubly as D
+import Diagram.Mesh (Mesh(Mesh))
+import qualified Diagram.Mesh as Mesh
 import Diagram.Progress
-import Diagram.Util hiding (ratio)
-import Diagram.Information
-
-data TrainState m = TrainState {
-  trainModel :: !Model, -- model fitted on trainBuffer
-  fwdRules :: !(Map (Int,Int) Int), -- (s0,s1) -> s01
-  extensionTrie :: !(Trie ()), -- extensions of all symbols
-  trainBuffer :: ![Int], -- constructed data
-  symbolSource :: !(Stream (Of Int) m ()), -- source for appending data
-  symbolCandidates :: !(Map (Int,Int) Int), -- (s0,s1) -> n01
-  bufExtLength :: !Int,
-  symbolLengths :: !(U.Vector Int) -- atomic length of symbol's extensions
-}
 
 main :: IO ()
 main = do
-  (maxBufLen, filename) <- (getArgs >>=) $ \case
+  (maxStrLen, filename) <- (getArgs >>=) $ \case
     [filename] -> return (maxBound, filename)
-    [maxBufLenStr, filename] -> return (read maxBufLenStr, filename)
+    [maxLenStr, filename] -> return (read maxLenStr, filename)
     _else -> putStrLn "Usage: diagram [SIZE] FILENAME" >>
              exitFailure
 
@@ -76,10 +63,19 @@ main = do
                     ++ "-run-" ++ timestamp ++ ".csv"
   csvHandle <- openFile logFilePath WriteMode
 
+  -- take n + count how many
+  str0 :> src0 <- S.toList $ S.splitAt maxStrLen $ S.map fromEnum $
+                  Q.unpack $ Q.fromHandle srcHandle
+
+  msh0 <- Mesh.fromList R.empty str0
+
   -- <main loop>
-  let go (TrainState mdl@(Model rs n ks) rsm trie buf src cdts bel sls) = do
+  case () of
+    _ -> go msh0 src0 where
+      go msh@(Mesh mdl@(Model rs n ks) ss _ buf _ _ _ cdts) src = do
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
-            scale = fromIntegral srcLen / fromIntegral bel
+            sel = Mesh.extLen msh
+            scale = fromIntegral srcLen / fromIntegral sel
 
             -- <Mdl.scaledInformation>
             sn     = scale * fromIntegral n
@@ -116,8 +112,10 @@ main = do
           (show $ Just rs == rsDecoded)
 
         -- n valid.
-        srcL <- R.subst rs <$> S.toList_ src
-        let ssReal = buf ++ srcL
+        ssL <- D.toList ss
+        bufL <- D.toList buf
+        srcL <- S.toList_ src
+        let ssReal = R.subst rs $ ssL ++ bufL ++ srcL
             (sks,ssCode) = Comb.encodeMultisetPermutation ssReal
             numSymbols = R.numSymbols rs
             ksReal = V.toList $ runST $ do -- add bins with zero counts
@@ -188,87 +186,29 @@ main = do
           (R.toEscapedString rs [s0,s1])
         hFlush csvHandle
 
+        -- [EXIT]
         when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.")
                           >> hClose csvHandle
                           >> exitSuccess )
 
-        let (s01, mdl'@(Model rs' n' _)) = Mdl.pushRule mdl (s0,s1) n01
-            rsm' = M.insert (s0,s1) s01 rsm
-            bs01 = BS.pack $ R.extension rs' s01
-            trie' = Trie.insert bs01 () trie
-
-        buf' <- pbSeq n' (here "Rewriting string") $
-                subst1 (s0,s1) s01 buf
-
-        (am,rm,sn') <- recountM (s0,s1) s01 $ -- count maps (am,rm)
-                       withPB n' (here "Updating counts") $
-                       fmap (fromMaybe (error "empty buf") -- Maybe a -> a
-                              . S.fst') $ -- drop ()
-                       S.last $ S.copy $ -- last symbol :: Maybe a
-                       S.each buf'
-
-        -- extend the buffer
-        ss :> src' <- S.toList $
-                      R.splitAtSubst rs' rsm' trie' (n - n') $
-                      S.each srcL -- src
-
-        -- refine state with new symbols
-        let mdl'' = Mdl.addCounts mdl' ss
-            buf'' | null ss = buf'
-                  | otherwise = buf' ++ ss
-            cdts' = (countJoints_ cdts sn' ss `sub` rm) `add` am
-            bel' = bel + sum ((sls' V.!) <$> ss)
-            sls' = V.snoc sls (sls V.! s0 + sls V.! s1)
-
+        (_s01, msh') <- Mesh.pushRule msh (s0,s1)
+        (msh'', src') <- fill msh' $ S.each srcL
         putStrLn ""
-        go $ TrainState mdl'' rsm' trie' buf'' src' cdts' bel' sls'
+        go msh'' src'
   -- </main loop>
 
-      src0 = S.map fromEnum $ Q.unpack $ Q.fromHandle srcHandle
-
-  buf0 :> n0 :> src0' <- S.toList $ S.length $ S.copy $
-                         S.splitAt maxBufLen src0
-  let mdl0 = Mdl.addCounts Mdl.empty buf0
-  (cdts0,()) <- countJointsM $
-                withPB n0 "Initializing joint counts" $
-                S.each buf0
-  let bel0 = n0
-      sls0 = V.replicate 256 1
-
-  -- go
-  go $ TrainState mdl0 M.empty Trie.empty buf0 src0' cdts0 bel0 sls0
-
   where
-    -- | O(log(n)) equiv. of M.filter (> 0) .: M.unionWith (+)
-    add :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
-    add = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id
-
-    sub :: Map (Int,Int) Int -> Map (Int,Int) Int -> Map (Int,Int) Int
-    sub = M.differenceWith (nothingIf (== 0) .: (-))
+    fill msh src
+      | Mesh.full msh = return (msh,src)
+      | otherwise = (S.next src >>=) $ \case
+          Left r -> return (msh, return r)
+          Right (s,src') -> flip fill src' =<< Mesh.snoc msh s
 
     showCdt rs (loss,(s0,s1),n01) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
       (show $ R.toEscapedString rs [s0])
       (show $ R.toEscapedString rs [s1])
       (show $ R.toEscapedString rs [s0,s1])
-
-    -- DEBUG --
-    --       deltam = M.filter (uncurry (/=)) $ mergeMaps m' $
-    --                countJoints ss'
-    --   if not $ M.null deltam
-    --     then error $ "counts discrepancy (updated,recounted): " ++ show deltam
-    --          ++ "\njust added: "
-    --          ++ show (mapMaybe (\k -> (k,) <$> (am M.!? k)) $
-    --                    M.keys deltam)
-    --          ++ "\njust removed: "
-    --          ++ show (mapMaybe (\k -> (k,) <$> (rm M.!? k)) $
-    --                    M.keys deltam )
-    --     else go mdl' ss' m' -- continue
-    -- mergeMaps :: Ord a => M.Map a b -> M.Map a b -> M.Map a (Maybe b, Maybe b)
-    -- mergeMaps = M.mergeWithKey
-    --  (\_ v1 v2 -> Just (Just v1, Just v2))
-    --  (M.mapMaybeWithKey (\_ v1 -> Just (Just v1, Nothing)))
-    --  (M.mapMaybeWithKey (\_ v2 -> Just (Nothing, Just v2)))
 
 -- | Substitute a single pair of symbols for a constructed joint symbol
 -- in a string of symbols

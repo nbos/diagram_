@@ -6,7 +6,6 @@ import Control.Monad
 import Control.Monad.Primitive
 
 import Data.Maybe
-import Data.Bifunctor
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -39,7 +38,7 @@ type Doubly s = D.Doubly MVector s Sym
 -- MESH --
 ----------
 
--- | Symbol string with all our bookkeeping
+-- | Symbol string with all the bookkeeping
 data Mesh s = Mesh {
   model :: !Model, -- ^ String's model :: (rs,n,ks)
   string :: !(Doubly s), -- ^ Fixed size underlying string
@@ -47,11 +46,17 @@ data Mesh s = Mesh {
   buffer :: !(Doubly s), -- ^ Right buffer of partial constructions
   fwdRules :: !(Map (Sym,Sym) Sym), -- ^ Forward rules
   extTrie :: !(Trie ()), -- ^ Extensions of all symbols
+  extLens :: !(U.Vector Int), -- ^ Length of extension of all symbols
   candidates :: !(Map (Sym,Sym) Int) -- ^ Joint counts (candidates)
 }
 
 full :: Mesh s -> Bool
-full (Mesh _ ss _ _ _ _ _) = D.full ss
+full (Mesh _ ss _ _ _ _ _ _) = D.full ss
+
+-- | O(numSymbols). The length of the string's extension.
+extLen :: Mesh s -> Int
+extLen (Mesh (Model _ _ ks) _ _ _ _ _ sls _) =
+  U.sum $ U.zipWith (*) ks sls
 
 checkParity :: PrimMonad m => Doubly (PrimState m) -> m Bool
 checkParity ss = (S.next (D.toRevStream ss) >>=) $ \case
@@ -70,13 +75,14 @@ fromList rs l = do
       even <$> S.length_ (S.takeWhile (== sn) revRest)
 
   buf <- D.new 10 -- could be bigger
-  return $ Mesh mdl ss par buf rsm trie cdts
+  return $ Mesh mdl ss par buf rsm trie sls cdts
   where
     numSymbols = R.numSymbols rs
     mdl = Mdl.fromList rs l
     rsm = R.toMap rs
     trie = Trie.fromList $
            (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
+    sls = U.generate numSymbols $ R.symbolLength rs
     cdts = countJoints l
 
 -- | Construction from a stream of size at most `n`
@@ -94,19 +100,20 @@ fromStream rs n str = do
       even <$> S.length_ (S.takeWhile (== sn) revRest)
 
   buf <- D.new 10 -- could be bigger
-  return (Mesh mdl ss par buf rsm trie cdts, r)
+  return (Mesh mdl ss par buf rsm trie sls cdts, r)
 
   where
     numSymbols = R.numSymbols rs
     rsm = R.toMap rs
     trie = Trie.fromList $
            (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
+    sls = U.generate numSymbols $ R.symbolLength rs
 
 -- | Compute the loss for each candidate joint and return joints ordered
 -- by loss, lowest first, with count.
 -- TODO: bookkeep
 sortCandidates :: Mesh s -> Double -> [(Double,((Sym,Sym),Int))]
-sortCandidates (Mesh mdl _ _ _ _ _ cdts) scale =
+sortCandidates (Mesh mdl _ _ _ _ _ _ cdts) scale =
   L.sort $ withLoss <$> M.toList cdts
   where
     withLoss = toFst $ uncurry $ Mdl.scaledInfoDelta scale mdl
@@ -114,7 +121,7 @@ sortCandidates (Mesh mdl _ _ _ _ _ cdts) scale =
 -- | Add a rule, rewrite, with progress bars
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
-pushRule (Mesh mdl ss _ buf rsm trie cdts) (s0,s1) = do
+pushRule (Mesh mdl ss _ buf rsm trie sls cdts) (s0,s1) = do
   i01s <- S.toList_ $ D.jointIndices ss (s0,s1)
 
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
@@ -128,8 +135,10 @@ pushRule (Mesh mdl ss _ buf rsm trie cdts) (s0,s1) = do
   par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
+
   let cdts' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id cdts m
-  return (s01, Mesh mdl' ss' par' buf' rsm' trie' cdts')
+  (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
+
   where
     here = (++) (" [" ++ show s01 ++ "]: ")
     err = error $ "not a candidate: " ++ show (s0,s1)
@@ -137,13 +146,14 @@ pushRule (Mesh mdl ss _ buf rsm trie cdts) (s0,s1) = do
     (s01, mdl'@(Model rs' _ _)) = Mdl.pushRule mdl (s0,s1) n01
     bs01 = R.bytestring rs' s01
     trie' = Trie.insert bs01 () trie
+    sls' = U.snoc sls $ sum $ R.symbolLength rs' <$> [s0,s1]
     rsm' = M.insert (s0,s1) s01 rsm
 
 -- | While there is free space in the symbol string and the buffer is
 -- not the prefix of any potential symbol, append the fully constructed
 -- symbols at the head of the buffer to the end of the symbol string
 flush :: PrimMonad m => Mesh (PrimState m) -> m (Mesh (PrimState m))
-flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie cdts0)
+flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
   | D.full ss0 = return msh
   | otherwise = do
       sn0 <- fromMaybe minBound <$> D.last ss0 -- minBound hacky but w/e
@@ -154,7 +164,7 @@ flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie cdts0)
   where
     go !ss !par !buf !cdts !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
-          return $ Mesh mdl ss par buf rsm trie cdts -- end
+          return $ Mesh mdl ss par buf rsm trie sls cdts -- end
       | otherwise = do
           let i = fromJust $ D.head buf
           s <- D.read buf i
@@ -172,7 +182,7 @@ flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie cdts0)
 
 snoc :: forall m. PrimMonad m =>
         Mesh (PrimState m) -> Sym -> m (Mesh (PrimState m))
-snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _) s = do
+snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _ _) s = do
   buf <- go buf0 s
   flush $ msh{ buffer = buf }
   where
