@@ -156,12 +156,13 @@ flush :: PrimMonad m => Mesh (PrimState m) -> m (Mesh (PrimState m))
 flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
   | D.full ss0 = return msh
   | otherwise = do
-      sn0 <- fromMaybe minBound <$> D.last ss0 -- minBound hacky but w/e
+      sn0 <- D.read ss0 . fromMaybe err =<< D.last ss0
       go ss0 par0 buf0 cdts0 sn0
         . BS.pack
         . concatMap (R.extension rs)
         =<< D.toList buf0
   where
+    err = error "Mesh.flush: empty mesh case not implemented"
     go !ss !par !buf !cdts !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
           return $ Mesh mdl ss par buf rsm trie sls cdts -- end

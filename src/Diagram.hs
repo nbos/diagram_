@@ -193,6 +193,7 @@ main = do
 
         (_s01, msh') <- Mesh.pushRule msh (s0,s1)
         (msh'', src') <- fill msh' $ S.each srcL
+
         putStrLn ""
         go msh'' src'
   -- </main loop>
@@ -202,7 +203,7 @@ main = do
       | Mesh.full msh = return (msh,src)
       | otherwise = (S.next src >>=) $ \case
           Left r -> return (msh, return r)
-          Right (s,src') -> flip fill src' =<< Mesh.snoc msh s
+          Right (s,src') -> Mesh.snoc msh s >>= flip fill src'
 
     showCdt rs (loss,(s0,s1),n01) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
