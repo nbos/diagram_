@@ -42,8 +42,8 @@ incCounts :: PrimMonad m => Model (PrimState m) -> [Int] -> m (Model (PrimState 
 incCounts = foldM incCount
 
 incCount :: PrimMonad m => Model (PrimState m) -> Int -> m (Model (PrimState m))
-incCount mdl@(Model _ _ ks) s = MV.modify ks (+1) s
-                                >> return mdl
+incCount (Model rs n ks) s = MV.modify ks (+1) s
+                             >> return (Model rs (n+1) ks)
 
 -- | Reconstruction from rule set and symbol string
 fromList :: PrimMonad m => Rules -> [Int] -> m (Model (PrimState m))
@@ -222,7 +222,7 @@ scaledStringInfo :: PrimMonad m => Double -> Model (PrimState m) -> m Double
 scaledStringInfo scale (Model _ n ks)
   | n <= 1 = return 0
   | otherwise = do
-      ldenom <- MV.foldl' (flip ((+) . scaleLogFact)) 0.0 ks
+      ldenom <- MV.foldl' (\acc k -> acc + scaleLogFact k) 0.0 ks
       return $ log2e * (scaleLogFact n - ldenom)
   where scaleLogFact = logFactorial . (scale*) . fromIntegral
 
