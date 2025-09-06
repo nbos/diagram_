@@ -1,5 +1,5 @@
 {-# LANGUAGE LambdaCase, ScopedTypeVariables, TypeApplications #-}
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, TupleSections #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
 
@@ -73,17 +73,17 @@ main = do
   case () of
     _ -> go msh0 src0 where
       go msh@(Mesh mdl@(Model rs n ks) ss _ buf _ _ _ cdts) src = do
+        sel <- Mesh.extLen msh
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
-            sel = Mesh.extLen msh
             scale = fromIntegral srcLen / fromIntegral sel
 
             -- <Mdl.scaledInformation>
             sn     = scale * fromIntegral n
             rsInfo = ceiling @_ @Int $ R.information rs
             nInfo  = ceiling @_ @Int $ eliasInfo (round sn)
-            ksInfo = ceiling @_ @Int $ Mdl.fDistrInfo sn (fromIntegral $ V.length ks)
-            ssInfo = ceiling @_ @Int $ Mdl.scaledStringInfo scale mdl
-            approxTotalInfo = rsInfo + nInfo + ksInfo + ssInfo
+            ksInfo = ceiling @_ @Int $ Mdl.fDistrInfo sn (fromIntegral $ MV.length ks)
+        ssInfo <- ceiling @_ @Int <$> Mdl.scaledStringInfo scale mdl
+        let approxTotalInfo = rsInfo + nInfo + ksInfo + ssInfo
             -- </Mdl.scaledInformation>
 
             approxRatio = fromIntegral approxTotalInfo / origInfo
@@ -161,15 +161,15 @@ main = do
           putStr "ssReal: " >> print ssReal
           putStr "ssDecoded: " >> print ssDecoded
 
-        cdtList <- pbSeq (M.size cdts) (here "Computing losses") $
-                   (<$> M.toList cdts) $ \(s0s1,n01) ->
-          let loss = Mdl.scaledInfoDelta scale mdl s0s1 n01
-          in loss `seq` (loss, s0s1, n01)
+        cdtList <- S.toList_ $
+          S.mapM (\cdt -> (,cdt) <$> uncurry (Mdl.scaledInfoDelta scale mdl) cdt) $
+          withPB (M.size cdts) (here "Computing losses") $
+          S.each $ M.toList cdts
 
         putStrLn $ here "Sorting candidates..."
-        (loss,(s0,s1),n01) <- case L.sort cdtList of
+        (loss,((s0,s1),n01)) <- case L.sort cdtList of
           [] -> error "no candidates"
-          (c@(loss,_,_):cdts') -> do
+          (c@(loss,_):cdts') -> do
             when (loss < 0) $ putStrLn $ here $
                               "Intro: \n   " ++ showCdt rs c
             putStrLn $ here "Next top candidates:"
@@ -205,7 +205,7 @@ main = do
           Left r -> return (msh, return r)
           Right (s,src') -> Mesh.snoc msh s >>= flip fill src'
 
-    showCdt rs (loss,(s0,s1),n01) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
+    showCdt rs (loss,((s0,s1),n01)) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
       (show $ R.toString rs [s0])
       (show $ R.toString rs [s1])

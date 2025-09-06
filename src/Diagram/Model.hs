@@ -2,9 +2,8 @@ module Diagram.Model (module Diagram.Model) where
 
 import Control.Monad.ST
 import Control.Monad
-import Control.Monad.Primitive (PrimMonad)
+import Control.Monad.Primitive (PrimMonad(PrimState))
 
-import Data.STRef
 import Data.Bifunctor
 
 import qualified Data.Vector.Unboxed as U
@@ -26,57 +25,51 @@ import Diagram.Information
 -- an integer-multinomial distribution (histogram) of the symbols that
 -- can be resolved a given string identifying corresponding multiset
 -- permutations
-data Model = Model {
+data Model s = Model {
   modelRules :: !Rules,
   modelTotalCount :: !Int,
-  modelCounts :: !(U.Vector Int)
-} deriving Show
+  modelCounts :: !(U.MVector s Int)
+}
 
 ------------------
 -- CONSTRUCTION --
 ------------------
 
-empty :: Model
-empty = Model R.empty 0 $ U.replicate 256 0
+empty :: PrimMonad m => m (Model (PrimState m))
+empty = Model R.empty 0 <$> U.unsafeThaw (U.replicate 256 0)
 
-addCounts :: Model -> [Int] -> Model
-addCounts (Model rs n ks) ss = runST $ do
-  nref <- newSTRef n
-  mutks <- V.thaw ks
-  forM_ ss $ \s -> do
-    modifySTRef' nref (+1)
-    MV.modify mutks (+1) s
-  n' <- readSTRef nref
-  ks' <- V.unsafeFreeze mutks
-  return $ Model rs n' ks'
+incCounts :: PrimMonad m => Model (PrimState m) -> [Int] -> m (Model (PrimState m))
+incCounts = foldM incCount
 
-addCount :: PrimMonad m => Model -> Int -> m Model
-addCount = undefined
+incCount :: PrimMonad m => Model (PrimState m) -> Int -> m (Model (PrimState m))
+incCount mdl@(Model _ _ ks) s = MV.modify ks (+1) s
+                                >> return mdl
 
 -- | Reconstruction from rule set and symbol string
-fromList :: Rules -> [Int] -> Model
-fromList rs ss = runST $ do
-  mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
-  forM_ ss $ MV.modify mks (+1)
-  ks <- U.unsafeFreeze mks
-  return $ Model rs (V.sum ks) ks
+fromList :: PrimMonad m => Rules -> [Int] -> m (Model (PrimState m))
+fromList rs ss = do
+  ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
+  forM_ ss $ MV.modify ks (+1)
+  n <- MV.foldl' (+) 0 ks
+  return $ Model rs n ks
 
-fromStream :: PrimMonad m => Rules -> Stream (Of Int) m r -> m (Model, r)
+fromStream :: PrimMonad m => Rules -> Stream (Of Int) m r -> m (Model (PrimState m), r)
 fromStream rs ss = do
-  mks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
-  r <- S.effects $ S.mapM (MV.modify mks (+1)) ss
-  ks <- U.unsafeFreeze mks
-  return (Model rs (V.sum ks) ks, r)
+  ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
+  r <- S.effects $ S.mapM (MV.modify ks (+1)) ss
+  n <- MV.foldl' (+) 0 ks
+  return (Model rs n ks, r)
 
-pushRule :: Model -> (Int,Int) -> Int -> (Int, Model)
-pushRule (Model rs n ks) (s0,s1) n01 = (s01, Model rs' n' ks')
+pushRule :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int ->
+                           m (Int, Model (PrimState m))
+pushRule (Model rs n ks) (s0,s1) n01 = do
+  ks' <- MV.grow ks 1  -- O(n) snoc
+  MV.write ks' s01 n01 --
+  forM_ [s0,s1] $ MV.modify ks' (+(-n01))
+  return (s01, Model rs' n' ks')
   where
     (s01,rs') = R.pushRule (s0,s1) rs
     n' = n - n01
-    ks' = runST $ do
-      mutks <- V.unsafeThaw $ V.snoc ks n01 -- O(n) snoc
-      forM_ [s0,s1] $ MV.modify mutks (+(-n01))
-      V.unsafeFreeze mutks
 
 -------------------
 -- SERIALIZATION --
@@ -99,15 +92,15 @@ encode rs ss = rsCode <> nCode <> ksCode <> ssCode
 
 -- | Deserialize a model+symbol string at the head of a given bit vector
 -- that was serialized using @encode@
-decode :: BitVec -> Maybe (Model, [Int], BitVec)
-decode bv = do
-  (rs, bv') <- R.decode bv
-  (n , bv'') <- first fromInteger <$> Elias.decodeDelta bv'
-  let numSymbols = R.numSymbols rs
-  (ks, bv''') <- Comb.decodeDistribution (n,numSymbols) bv''
-  let model = Model rs n (V.fromList ks)
-  (ss, bv'''') <- Comb.decodeMultisetPermutation (zip [0..] ks) bv'''
-  Just (model, ss, bv'''')
+decode :: PrimMonad m => BitVec -> m (Maybe (Model (PrimState m), [Int], BitVec))
+decode bv
+  | Just (rs, bv') <- R.decode bv
+  , Just (n , bv'') <- first fromInteger <$> Elias.decodeDelta bv'
+  , Just (ks, bv''') <- Comb.decodeDistribution (n, R.numSymbols rs) bv''
+  , Just (ss, bv'''') <- Comb.decodeMultisetPermutation (zip [0..] ks) bv''' = do
+      mdl <- Model rs n <$> U.unsafeThaw (V.fromList ks)
+      return $ Just (mdl, ss, bv'''')
+  | otherwise = return Nothing
 
 --------------------------
 -- INFORMATION MEASURES --
@@ -116,33 +109,40 @@ decode bv = do
 -- MODEL * STRING --
 
 -- | Information in bits of the given model + a sampled symbol string
-information :: Model -> Double
-information mdl@(Model rs n ks) = rsInfo + nInfo + ksInfo + ssInfo
+information :: PrimMonad m => Model (PrimState m) -> m Double
+information mdl@(Model rs n ks) = (rsInfo + nInfo + ksInfo +) <$> ssInfo
   where
     rsInfo = R.information rs
     nInfo = eliasInfo n
-    ksInfo = distrInfo n (V.length ks)
+    ksInfo = distrInfo n (MV.length ks)
     ssInfo = stringInfo mdl
 
 -- | Information in bits of the given model + a sampled symbol string if
 -- the string the model was fit on `scale` times as big
-scaledInformation :: Double -> Model -> Double
+scaledInformation :: PrimMonad m => Double -> Model (PrimState m) -> m Double
 scaledInformation scale mdl@(Model rs n ks) =
-  rsInfo + nInfo + ksInfo + ssInfo
+  (rsInfo + nInfo + ksInfo +) <$> ssInfo
   where
     sn     = scale * fromIntegral n
     rsInfo = R.information rs
     nInfo  = eliasInfo (round sn)
-    ksInfo = fDistrInfo sn (fromIntegral $ V.length ks)
+    ksInfo = fDistrInfo sn (fromIntegral $ MV.length ks)
     ssInfo = scaledStringInfo scale mdl
 
 -- Δ
 
 -- | Compute the change in code length (bits) of the model + symbol
 -- string matching it given a new rule introduction
-infoDelta :: Model -> (Int,Int) -> Int -> Double
-infoDelta (Model rs n ks) (s0,s1) k01 =
-  rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+infoDelta :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int -> m Double
+infoDelta (Model rs n ks) (s0,s1) k01 = do
+  k0 <- MV.read ks s0
+  k1 <- MV.read ks s1
+
+  -- ss a multiset permutation of counts ks:
+  let ssInfoDelta = stringInfoDelta n ((s0,k0),(s1,k1)) k01
+
+  return $ rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+
   where
     numSymbols = R.numSymbols rs
     -- rules info delta (constant):
@@ -153,21 +153,25 @@ infoDelta (Model rs n ks) (s0,s1) k01 =
     -- ks a distribution of n elements:
     ksInfoDelta = distrInfo n' (numSymbols + 1) -- new
                   - distrInfo n numSymbols -- old
-    -- ss a multiset permutation of counts ks:
-    ssInfoDelta = stringInfoDelta n ((s0,k0),(s1,k1)) k01
 
-    k0 = ks V.! s0
-    k1 = ks V.! s1
 
 -- | Expected `infoDelta` when the model's size `n` is scaled by `scale`
-scaledInfoDelta :: Double -> Model -> (Int,Int) -> Int -> Double
-scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
-    rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+scaledInfoDelta :: PrimMonad m => Double -> Model (PrimState m) ->
+                                  (Int,Int) -> Int -> m Double
+scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 = do
+  k0 <- MV.read ks s0
+  k1 <- MV.read ks s1
+
+  let sk0 = scale * fromIntegral k0
+      sk1 = scale * fromIntegral k1
+      -- ss a multiset permutation of counts ks:
+      ssInfoDelta = fStringInfoDelta sn ((s0,sk0),(s1,sk1)) sk01
+
+  return $ rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+
   where
     sn   = scale * fromIntegral n
     sk01 = scale * fromIntegral k01
-    sk0  = scale * fromIntegral (ks V.! s0)
-    sk1  = scale * fromIntegral (ks V.! s1)
     sn'  = sn - sk01
 
     numSymbols = R.numSymbols rs
@@ -179,8 +183,6 @@ scaledInfoDelta scale (Model rs n ks) (s0,s1) k01 =
     -- ks a distribution of n elements:
     ksInfoDelta = fDistrInfo sn' (fNumSymbols + 1) -- new
                   - fDistrInfo sn fNumSymbols -- old
-    -- ss a multiset permutation of counts ks:
-    ssInfoDelta = fStringInfoDelta sn ((s0,sk0),(s1,sk1)) sk01
 
 -- DISTR's, i.e. ks --
 
@@ -209,15 +211,19 @@ fDistrInfo = distrInfoWith logFactorial
 
 -- | Information in bits of the rank of a multiset permutation resolving
 -- a string for the given model
-stringInfo :: Model -> Double
+stringInfo :: PrimMonad m => Model (PrimState m) -> m Double
 stringInfo (Model _ n ks)
-  | n <= 1 = 0
-  | otherwise = log2e * (iLogFactorial n - V.sum (V.map iLogFactorial ks))
+  | n <= 1 = return 0
+  | otherwise = do
+      ldenom <- MV.foldl' (flip ((+) . iLogFactorial)) 0.0 ks
+      return $ log2e * (iLogFactorial n - ldenom)
 
-scaledStringInfo :: Double -> Model -> Double
+scaledStringInfo :: PrimMonad m => Double -> Model (PrimState m) -> m Double
 scaledStringInfo scale (Model _ n ks)
-  | n <= 1 = 0
-  | otherwise = log2e * (scaleLogFact n - V.sum (V.map scaleLogFact ks))
+  | n <= 1 = return 0
+  | otherwise = do
+      ldenom <- MV.foldl' (flip ((+) . scaleLogFact)) 0.0 ks
+      return $ log2e * (scaleLogFact n - ldenom)
   where scaleLogFact = logFactorial . (scale*) . fromIntegral
 
 -- Δ
