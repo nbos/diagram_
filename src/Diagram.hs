@@ -177,7 +177,7 @@ main = do
             return c
 
         hPutStrLn csvHandle $
-          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, \"%s\", \"%s\", \"%s\""
+          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
           (R.numSymbols rs) approxFactor -- %d, %.4f
           approxTotalInfo rsInfo nInfo ksInfo ssInfo -- %d, %d, %d, %d, %d
           s0 s1 n01 loss -- %d, %d, %d, %f
@@ -207,9 +207,9 @@ main = do
 
     showCdt rs (loss,(s0,s1),n01) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
-      (show $ R.toEscapedString rs [s0])
-      (show $ R.toEscapedString rs [s1])
-      (show $ R.toEscapedString rs [s0,s1])
+      (show $ R.toString rs [s0])
+      (show $ R.toString rs [s1])
+      (show $ R.toString rs [s0,s1])
 
 -- | Substitute a single pair of symbols for a constructed joint symbol
 -- in a string of symbols

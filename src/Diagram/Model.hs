@@ -50,6 +50,9 @@ addCounts (Model rs n ks) ss = runST $ do
   ks' <- V.unsafeFreeze mutks
   return $ Model rs n' ks'
 
+addCount :: PrimMonad m => Model -> Int -> m Model
+addCount = undefined
+
 -- | Reconstruction from rule set and symbol string
 fromList :: Rules -> [Int] -> Model
 fromList rs ss = runST $ do

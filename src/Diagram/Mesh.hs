@@ -153,22 +153,23 @@ pushRule (Mesh mdl ss _ buf rsm trie sls cdts) (s0,s1) = do
 -- not the prefix of any potential symbol, append the fully constructed
 -- symbols at the head of the buffer to the end of the symbol string
 flush :: PrimMonad m => Mesh (PrimState m) -> m (Mesh (PrimState m))
-flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
+flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
   | D.full ss0 = return msh
   | otherwise = do
       sn0 <- D.read ss0 . fromMaybe err =<< D.last ss0
-      go ss0 par0 buf0 cdts0 sn0
+      go mdl0 ss0 par0 buf0 cdts0 sn0
         . BS.pack
         . concatMap (R.extension rs)
         =<< D.toList buf0
   where
     err = error "Mesh.flush: empty mesh case not implemented"
-    go !ss !par !buf !cdts !sn !bs
+    go !mdl !ss !par !buf !cdts !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
           return $ Mesh mdl ss par buf rsm trie sls cdts -- end
       | otherwise = do
           let i = fromJust $ D.head buf
           s <- D.read buf i
+          mdl' <- Mdl.addCount mdl s
           ss' <- fromJust <$> D.trySnoc ss s
           buf' <- D.delete buf i
           let len = R.symbolLength rs s
@@ -176,7 +177,7 @@ flush msh@(Mesh mdl@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
               par' = s /= sn || not par -- if s == sn then not par else True
               cdts' | s == sn && not par = cdts
                     | otherwise = M.insertWith (+) (sn,s) 1 cdts
-          go ss' par' buf' cdts' s bs'
+          go mdl' ss' par' buf' cdts' s bs'
       where
         exts = Trie.keys $ Trie.submap bs trie
         prefixing = not (null exts || exts == [bs])
