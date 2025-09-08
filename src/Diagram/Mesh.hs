@@ -124,19 +124,22 @@ sortCandidates (Mesh mdl _ _ _ _ _ _ cdts) scale =
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
 pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
-  i01s <- S.toList_ $ D.jointIndices ss (s0,s1)
-
   (s01, mdl') <- Mdl.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
 
+  -- Can't stream these three together bc of the way recountM has to
+  -- look behind and ahead on string
+  i01s <- S.toList_ $
+          withPB n01 (here "Finding construction sites") $
+          D.jointIndices ss (s0,s1)
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
-         withPB n01 (here "Substituting in new symbol") $
+         withPB n01 (here "Modifying string in place") $
          S.each i01s
-
   (m,_) <- recountM ss' (s0,s1) s01 $
-           withPB n01 (here "Computing delta of joint counts") $
+           withPB n01 (here "Computing change on candidates") $
            S.each i01s
+  --
 
   par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $

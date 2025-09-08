@@ -290,7 +290,7 @@ printApproxReport rs n src = do
       rsError = 100 * (rsInfo - fromIntegral rsCodeLen)
                 / fromIntegral rsCodeLen :: Double
       rsDecoded = fst <$> R.decode rsCode
-  putStrLn $ printf "   rs: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+  putStrLn $ printf "   rs: est. %.1f real %d (%+.2f%% err.) (roundtrip: %s)"
     rsInfo rsCodeLen rsError
     (show $ Just rs == rsDecoded)
 
@@ -299,7 +299,7 @@ printApproxReport rs n src = do
       nError = 100 * (nInfo - fromIntegral nCodeLen)
                / fromIntegral nCodeLen :: Double
       nDecoded = fst <$> Elias.decodeDelta nCode
-  putStrLn $ printf "   n:  est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+  putStrLn $ printf "   n:  est. %.1f real %d (%+.2f%% err.) (roundtrip: %s)"
     nInfo nCodeLen nError
     (show $ Just (fromIntegral nReal) == nDecoded)
 
@@ -308,7 +308,7 @@ printApproxReport rs n src = do
       ksError = 100 * (ksInfo - fromIntegral ksCodeLen)
                 / fromIntegral ksCodeLen :: Double
       ksDecoded = fst <$> Comb.decodeDistribution (nReal,numSymbols) ksCode
-  putStrLn $ printf "   ks: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+  putStrLn $ printf "   ks: est. %.1f real %d (%+.2f%% err.) (roundtrip: %s)"
     ksInfo ksCodeLen ksError
     (show $ Just ksReal == ksDecoded)
   when (Just ksReal /= ksDecoded) $ do
@@ -322,7 +322,7 @@ printApproxReport rs n src = do
       ssError = 100 * (ssInfo - fromIntegral ssCodeLen)
                 / fromIntegral ssCodeLen :: Double
       ssDecoded = fst <$> Comb.decodeMultisetPermutation (zip [0..] ksReal) ssCode
-  putStrLn $ printf "   ss: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
+  putStrLn $ printf "   ss: est. %.1f real %d (%+.2f%% err.) (roundtrip: %s)"
     ssInfo ssCodeLen ssError
     (show $ Just ssReal == ssDecoded)
   when (Just ssReal /= ssDecoded) $ do

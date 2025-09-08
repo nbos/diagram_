@@ -3,16 +3,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
 
-import System.IO (openFile, IOMode(..), hFileSize, hPutStrLn, hFlush, hClose)
+import System.IO (hClose, hFileSize, hFlush, hPutStrLn, openFile, IOMode(WriteMode, ReadMode))
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName)
 import System.Environment (getArgs)
-import System.Exit
+import System.Exit (exitFailure, exitSuccess)
 
 import Control.Monad
-import Control.Monad.Primitive
+import Control.Monad.Primitive (PrimMonad(PrimState))
 
-import Text.Printf
+import Text.Printf (printf)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import Data.Map.Strict (Map)
@@ -23,12 +23,11 @@ import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 import qualified Data.Vector.Strict as B
 
-import Streaming hiding (first,second)
+import Streaming (Of(..), Stream, MonadTrans(lift))
 import qualified Streaming as S
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
-import Diagram.Information
 import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
 import qualified Diagram.Rules as R
@@ -65,34 +64,10 @@ main = do
   -- <main loop>
   case () of
     _ -> go msh0 src0 where
-      go msh@(Mesh mdl@(Model rs n ks) _ _ _ _ _ _ cdts) src = do
+      go msh@(Mesh mdl@(Model rs _ _) _ _ _ _ _ _ cdts) src = do
         sel <- Mesh.extLen msh
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
             scale = fromIntegral srcLen / fromIntegral sel
-
-            -- <Mdl.scaledInformation>
-            sn     = scale * fromIntegral n
-            rsInfo = ceiling @_ @Int $ R.information rs
-            nInfo  = ceiling @_ @Int $ eliasInfo (round sn)
-            ksInfo = ceiling @_ @Int $ Mdl.fDistrInfo sn (fromIntegral $ MV.length ks)
-        ssInfo <- ceiling @_ @Int <$> Mdl.scaledStringInfo scale mdl
-        let approxTotalInfo = rsInfo + nInfo + ksInfo + ssInfo
-            -- </Mdl.scaledInformation>
-
-            approxRatio = fromIntegral approxTotalInfo / origInfo
-            approxFactor = recip approxRatio
-
-        putStrLn $ here $ "LEN: " ++
-          printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
-                  ++ "factor: %.4f, over %.2f%% of input")
-          (commaize approxTotalInfo)
-          (commaize rsInfo)
-          (commaize nInfo)
-          (commaize ksInfo)
-          (commaize ssInfo)
-          (approxRatio * 100)
-          approxFactor
-          (100 * recip scale)
 
         cdtList <- S.toList_ $
           S.mapM (\cdt -> (,cdt) <$> uncurry (Mdl.scaledInfoDelta scale mdl) cdt) $
@@ -109,26 +84,49 @@ main = do
             forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
 
+        -- <log stats>
+        (rsInfo, nInfo, ksInfo, ssInfo) <- Mdl.scaledInformationParts scale mdl
+        let approxInfo = rsInfo + nInfo + ksInfo + ssInfo
+            approxRatio = approxInfo / origInfo
+            approxFactor = recip approxRatio
+
+        putStrLn $ here $ "LEN: " ++
+          printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
+                  ++ "factor: %.4f, over %.2f%% of input")
+          (commaize $ ceiling @_ @Int approxInfo)
+          (commaize $ ceiling @_ @Int rsInfo)
+          (commaize $ ceiling @_ @Int nInfo)
+          (commaize $ ceiling @_ @Int ksInfo)
+          (commaize $ ceiling @_ @Int ssInfo)
+          (approxRatio * 100)
+          approxFactor
+          (100 * recip scale)
+
         hPutStrLn csvHandle $
           printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
           (R.numSymbols rs) approxFactor -- %d, %.4f
-          approxTotalInfo rsInfo nInfo ksInfo ssInfo -- %d, %d, %d, %d, %d
+          (ceiling @_ @Int approxInfo) -- %d
+          (ceiling @_ @Int rsInfo) -- %d
+          (ceiling @_ @Int nInfo) -- %d
+          (ceiling @_ @Int ksInfo) -- %d
+          (ceiling @_ @Int ssInfo) -- %d
           s0 s1 n01 loss -- %d, %d, %d, %f
           (R.toEscapedString rs [s0])
           (R.toEscapedString rs [s1])
           (R.toEscapedString rs [s0,s1])
         hFlush csvHandle
-
-        -- [EXIT]
-        when (loss > 0) ( putStrLn (here "Reached minimum. Terminating.")
-                          >> hClose csvHandle
-                          >> exitSuccess )
-
-        (_s01, msh') <- Mesh.pushRule msh (s0,s1)
-        (msh'', src') <- fill msh' src
-
         putStrLn ""
-        go msh'' src'
+        -- </log stats>
+
+        if loss > 0
+          then putStrLn (here "Reached minimum. Terminating.")
+               >> hClose csvHandle
+               >> exitSuccess
+
+          else Mesh.pushRule msh (s0,s1)
+               >>= flip fill src . snd
+               >>= uncurry go -- (msh'', src')
+
   -- </main loop>
 
   where
