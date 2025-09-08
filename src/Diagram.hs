@@ -10,7 +10,6 @@ import System.Environment (getArgs)
 import System.Exit
 
 import Control.Monad
-import Control.Monad.ST
 import Control.Monad.Primitive
 
 import Text.Printf
@@ -20,7 +19,6 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.IntMap.Strict as IM
 
-import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 import qualified Data.Vector.Strict as B
@@ -30,15 +28,10 @@ import qualified Streaming as S
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
-import qualified Codec.Elias.Natural as Elias
-import qualified Codec.Arithmetic.Combinatorics as Comb
-import qualified Codec.Arithmetic.Variety.BitVec as BV
-
 import Diagram.Information
 import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
 import qualified Diagram.Rules as R
-import qualified Diagram.Doubly as D
 import Diagram.Mesh (Mesh(Mesh))
 import qualified Diagram.Mesh as Mesh
 import Diagram.Progress
@@ -72,7 +65,7 @@ main = do
   -- <main loop>
   case () of
     _ -> go msh0 src0 where
-      go msh@(Mesh mdl@(Model rs n ks) ss _ buf _ _ _ cdts) src = do
+      go msh@(Mesh mdl@(Model rs n ks) _ _ _ _ _ _ cdts) src = do
         sel <- Mesh.extLen msh
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
             scale = fromIntegral srcLen / fromIntegral sel
@@ -100,66 +93,6 @@ main = do
           (approxRatio * 100)
           approxFactor
           (100 * recip scale)
-
-        -- rs valid.
-        let rsCode = R.encode rs
-            rsCodeLen = BV.length rsCode
-            rsError = 100 * fromIntegral (rsInfo - rsCodeLen)
-                      / fromIntegral rsCodeLen :: Double
-            rsDecoded = fst <$> R.decode rsCode
-        putStrLn $ printf "   rs: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
-          rsInfo rsCodeLen rsError
-          (show $ Just rs == rsDecoded)
-
-        -- n valid.
-        ssL <- D.toList ss
-        bufL <- D.toList buf
-        srcL <- S.toList_ src
-        let ssReal = R.subst rs $ ssL ++ bufL ++ srcL
-            (sks,ssCode) = Comb.encodeMultisetPermutation ssReal
-            numSymbols = R.numSymbols rs
-            ksReal = V.toList $ runST $ do -- add bins with zero counts
-              mutks <- U.unsafeThaw $ U.replicate numSymbols 0
-              forM_ sks $ uncurry $ MV.write mutks
-              U.unsafeFreeze mutks
-
-            -- ksReal = snd <$> sks
-            ((nReal,_),ksCode) = Comb.encodeDistribution ksReal
-            nCode = Elias.encodeDelta $ fromIntegral nReal
-
-            nCodeLen = BV.length nCode
-            nError = 100 * fromIntegral (nInfo - nCodeLen)
-                     / fromIntegral nCodeLen :: Double
-            nDecoded = fst <$> Elias.decodeDelta nCode
-        putStrLn $ printf "   n:  est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
-          nInfo nCodeLen nError
-          (show $ Just (fromIntegral nReal) == nDecoded)
-
-        -- ks valid.
-        let ksCodeLen = BV.length ksCode
-            ksError = 100 * fromIntegral (ksInfo - ksCodeLen)
-                      / fromIntegral ksCodeLen :: Double
-            ksDecoded = fst <$> Comb.decodeDistribution (nReal,numSymbols) ksCode
-        putStrLn $ printf "   ks: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
-          ksInfo ksCodeLen ksError
-          (show $ Just ksReal == ksDecoded)
-        when (Just ksReal /= ksDecoded) $ do
-          print nReal
-          print numSymbols
-          putStr "ksReal: " >> print ksReal
-          putStr "ksDecoded: " >> print ksDecoded
-
-        -- ss valid.
-        let ssCodeLen = BV.length ssCode
-            ssError = 100 * fromIntegral (ssInfo - ssCodeLen)
-                      / fromIntegral ssCodeLen :: Double
-            ssDecoded = fst <$> Comb.decodeMultisetPermutation (zip [0..] ksReal) ssCode
-        putStrLn $ printf "   ss: est. %d real %d (%+.2f%% err.) (roundtrip: %s)"
-          ssInfo ssCodeLen ssError
-          (show $ Just ssReal == ssDecoded)
-        when (Just ssReal /= ssDecoded) $ do
-          putStr "ssReal: " >> print ssReal
-          putStr "ssDecoded: " >> print ssDecoded
 
         cdtList <- S.toList_ $
           S.mapM (\cdt -> (,cdt) <$> uncurry (Mdl.scaledInfoDelta scale mdl) cdt) $
@@ -192,7 +125,7 @@ main = do
                           >> exitSuccess )
 
         (_s01, msh') <- Mesh.pushRule msh (s0,s1)
-        (msh'', src') <- fill msh' $ S.each srcL
+        (msh'', src') <- fill msh' src
 
         putStrLn ""
         go msh'' src'

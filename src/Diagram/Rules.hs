@@ -5,8 +5,9 @@ module Diagram.Rules (module Diagram.Rules) where
 
 import Prelude
 
-import Control.Exception (assert)
 import Control.Monad
+import Control.Monad.ST
+import Control.Exception (assert)
 
 import Data.Word (Word8)
 import Data.Maybe
@@ -52,13 +53,25 @@ size = V.length
 numSymbols :: Rules -> Int
 numSymbols = (256 +) . size
 
--- | Compute the length of a symbol
+-- | O(len). Compute the length of a symbol
 symbolLength :: Rules -> Int -> Int
 symbolLength rs = go
   where
     go s | s < 256   = 1
          | otherwise = let (s0,s1) = rs V.! (s - 256)
                        in go s0 + go s1
+
+-- | O(numSymbols). Return a vector of the length of each symbol.
+symbolLengths :: Rules -> U.Vector Int
+symbolLengths rs = runST $ do
+  mv <- MV.new (numSymbols rs)
+  forM_ [0..255] $ \s -> MV.write mv s 1
+  forM_ [256..numSymbols rs - 1] $ \s -> do
+    let (s0,s1) = rs ! s
+    len0 <- MV.read mv s0
+    len1 <- MV.read mv s1
+    MV.write mv s (len0 + len1)
+  U.freeze mv
 
 fromList :: [(Int, Int)] -> Rules
 fromList = V.fromList

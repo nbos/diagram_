@@ -83,7 +83,7 @@ fromList rs l = do
     rsm = R.toMap rs
     trie = Trie.fromList $
            (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
-    sls = U.generate numSymbols $ R.symbolLength rs
+    sls = R.symbolLengths rs
     cdts = countJoints l
 
 -- | Construction from a stream of size at most `n`
