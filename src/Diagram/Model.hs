@@ -40,14 +40,16 @@ data Model s = Model {
 empty :: PrimMonad m => m (Model (PrimState m))
 empty = Model R.empty 0 <$> U.unsafeThaw (U.replicate 256 0)
 
-incCounts :: PrimMonad m => Model (PrimState m) -> [Int] -> m (Model (PrimState m))
+incCounts :: PrimMonad m => Model (PrimState m) -> [Int] ->
+                            m (Model (PrimState m))
 incCounts = foldM incCount
 
-incCount :: PrimMonad m => Model (PrimState m) -> Int -> m (Model (PrimState m))
-incCount (Model rs n ks) s = MV.modify ks (+1) s
-                             >> return (Model rs (n+1) ks)
+incCount :: PrimMonad m => Model (PrimState m) -> Int ->
+                           m (Model (PrimState m))
+incCount (Model rs n ks) s =
+  MV.modify ks (+1) s >> return (Model rs (n+1) ks)
 
--- | Reconstruction from rule set and symbol string
+-- | Reconstruction from rule set and fully constructed symbol string
 fromList :: PrimMonad m => Rules -> [Int] -> m (Model (PrimState m))
 fromList rs ss = do
   ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
@@ -55,7 +57,9 @@ fromList rs ss = do
   n <- MV.foldl' (+) 0 ks
   return $ Model rs n ks
 
-fromStream :: PrimMonad m => Rules -> Stream (Of Int) m r -> m (Model (PrimState m), r)
+-- | Reconstruction from rule set and fully constructed symbol stream
+fromStream :: PrimMonad m => Rules -> Stream (Of Int) m r ->
+                             m (Model (PrimState m), r)
 fromStream rs ss = do
   ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
   r <- S.effects $ S.mapM (MV.modify ks (+1)) ss

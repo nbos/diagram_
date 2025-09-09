@@ -75,7 +75,7 @@ def main(csv_files):
 
     # Labels & grid
     plt.xlabel('Dictionary size', fontsize=12)
-    plt.ylabel('Extrapolated compression ratio', fontsize=12)
+    plt.ylabel('Compression factor', fontsize=12)
     plt.grid(True, which='both', alpha=0.3)
 
     # "zero" axes

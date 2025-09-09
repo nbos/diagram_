@@ -2,13 +2,17 @@
 {-# LANGUAGE TupleSections, BangPatterns, LambdaCase, TypeApplications #-}
 module Diagram.Mesh (module Diagram.Mesh) where
 
-import Control.Monad
+import Control.Monad hiding (join)
 import Control.Monad.Primitive
 
+import Data.Word
 import Data.Maybe
+import Data.Tuple.Extra
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IS
 import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 import qualified Data.ByteString as BS
@@ -18,13 +22,12 @@ import qualified Data.Vector.Unboxed as U
 import Data.Vector.Unboxed.Mutable (MVector)
 import qualified Data.Vector.Generic.Mutable as MV
 
-import Streaming as S
+import Streaming as S hiding (first,second,join)
 import qualified Streaming.Prelude as S
 import Diagram.Streaming () -- PrimMonad Stream instance
 
 import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
-import Diagram.Rules (Rules)
 import qualified Diagram.Rules as R
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Mdl
@@ -47,7 +50,7 @@ data Mesh s = Mesh {
   fwdRules :: !(Map (Sym,Sym) Sym), -- ^ Forward rules
   extTrie :: !(Trie ()), -- ^ Extensions of all symbols
   extLens :: !(U.Vector Int), -- ^ Length of extension of all symbols
-  candidates :: !(Map (Sym,Sym) Int) -- ^ Joint counts (candidates)
+  candidates :: !(Map (Sym,Sym) (Int, IntSet)) -- ^ Joint counts + locations
 }
 
 full :: Mesh s -> Bool
@@ -64,35 +67,14 @@ checkParity ss = (S.next (D.toRevStream ss) >>=) $ \case
   Left () -> return False
   Right (sn, revRest) -> even <$> S.length_ (S.takeWhile (== sn) revRest)
 
--- | Construction
-fromList :: PrimMonad m => Rules -> [Sym] -> m (Mesh (PrimState m))
-fromList rs l = do
-  mdl <- Mdl.fromList rs l
-  ss <- D.fromList l
-
-  -- check parity of end of `ss`
-  par <- (S.next (D.toRevStream ss) >>=) $ \case
-    Left () -> return False
-    Right (sn, revRest) ->
-      even <$> S.length_ (S.takeWhile (== sn) revRest)
-
-  buf <- D.new 10 -- could be bigger
-  return $ Mesh mdl ss par buf rsm trie sls cdts
-  where
-    numSymbols = R.numSymbols rs
-    rsm = R.toMap rs
-    trie = Trie.fromList $
-           (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
-    sls = R.symbolLengths rs
-    cdts = countJoints l
-
--- | Construction from a stream of size at most `n`
-fromStream :: PrimMonad m => Rules -> Int -> Stream (Of Sym) m r ->
+-- | Construction from a stream of atoms size at most `n`
+fromStream :: PrimMonad m => Int -> Stream (Of Word8) m r ->
                              m (Mesh (PrimState m), r)
-fromStream rs n str = do
+fromStream n str = do
   (ss,(mdl,(cdts,r))) <- D.fromStream n $
-                         Mdl.fromStream rs $ S.copy $
-                         countJointsM $ S.copy str
+                         Mdl.fromStream R.empty $ S.copy $
+                         findJointsM_ M.empty $ S.zip (S.enumFrom 0) $ S.copy $
+                         S.map fromEnum str
 
   -- check parity of end of `ss`
   par <- (S.next (D.toRevStream ss) >>=) $ \case
@@ -104,21 +86,20 @@ fromStream rs n str = do
   return (Mesh mdl ss par buf rsm trie sls cdts, r)
 
   where
-    numSymbols = R.numSymbols rs
-    rsm = R.toMap rs
-    trie = Trie.fromList $
-           (,()) . BS.pack . R.extension rs <$> [0..numSymbols-1]
-    sls = U.generate numSymbols $ R.symbolLength rs
+    rsm = M.empty
+    trie = Trie.fromList $ (,()) . BS.pack . (:[]) <$> [0..255]
+    sls = U.replicate 256 1
 
 -- | Compute the loss for each candidate joint and return joints ordered
 -- by loss, lowest first, with count.
 -- TODO: bookkeep
 sortCandidates :: PrimMonad m => Mesh (PrimState m) -> Double ->
-                                 m [(Double,((Sym,Sym),Int))]
+                                 m [(Double,((Sym,Sym),(Int,IntSet)))]
 sortCandidates (Mesh mdl _ _ _ _ _ _ cdts) scale =
   L.sort <$> mapM withLoss (M.toList cdts)
-  where
-    withLoss cdt = (,cdt) <$> uncurry (Mdl.scaledInfoDelta scale mdl) cdt
+  where withLoss cdt@(s0s1,(n01,_)) = do
+          loss <- Mdl.scaledInfoDelta scale mdl s0s1 n01
+          return (loss,cdt)
 
 -- | Add a rule, rewrite, with progress bars
 pushRule :: (PrimMonad m, MonadIO m) =>
@@ -128,29 +109,28 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
 
-  -- Can't stream these three together bc of the way recountM has to
-  -- look behind and ahead on string
-  i01s <- S.toList_ $
-          withPB n01 (here "Finding construction sites") $
-          D.jointIndices ss (s0,s1)
+  -- Can't stream these two together bc of the way recountM has to look
+  -- behind and ahead on string
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
          withPB n01 (here "Modifying string in place") $
          S.each i01s
-  (m,_) <- recountM ss' (s0,s1) s01 $
-           withPB n01 (here "Computing change on candidates") $
-           S.each i01s
-  --
+  (am,rm,_) <- refindM ss' (s0,s1) s01 $
+               withPB n01 (here "Computing change on candidates") $
+               S.each i01s
 
   par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
 
-  let cdts' = M.mergeWithKey (const $ nothingIf (== 0) .: (+)) id id cdts m
+  let cdts' = M.mergeWithKey (const join) id id am $
+              M.mergeWithKey (const diff) id id cdts rm
   (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
 
   where
     err = error $ "not a candidate: " ++ show (s0,s1)
-    n01 = fromMaybe err $ M.lookup (s0,s1) cdts
+    join (a,s) (b,t) = nothingIf ((== 0) . fst) (a + b, IS.union s t)
+    diff (a,s) (b,t) = nothingIf ((== 0) . fst) (a - b, IS.difference s t)
+    (n01, i01s) = second IS.toList . fromMaybe err $ M.lookup (s0,s1) cdts
     bs01 = R.bytestring rs s0 <> R.bytestring rs s1
     trie' = Trie.insert bs01 () trie
     sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
@@ -162,14 +142,15 @@ flush :: PrimMonad m => Mesh (PrimState m) -> m (Mesh (PrimState m))
 flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
   | D.full ss0 = return msh
   | otherwise = do
-      sn0 <- D.read ss0 . fromMaybe err =<< D.last ss0
-      go mdl0 ss0 par0 buf0 cdts0 sn0
+      in0 <- fromMaybe err <$> D.last ss0
+      sn0 <- D.read ss0 in0
+      go mdl0 ss0 par0 buf0 cdts0 in0 sn0
         . BS.pack
         . concatMap (R.extension rs)
         =<< D.toList buf0
   where
     err = error "Mesh.flush: empty mesh case not implemented"
-    go !mdl !ss !par !buf !cdts !sn !bs
+    go !mdl !ss !par !buf !cdts !i_n !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
           return $ Mesh mdl ss par buf rsm trie sls cdts -- end
       | otherwise = do
@@ -182,8 +163,9 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
               bs' = BS.drop len bs
               par' = s /= sn || not par -- if s == sn then not par else True
               cdts' | s == sn && not par = cdts
-                    | otherwise = M.insertWith (+) (sn,s) 1 cdts
-          go mdl' ss' par' buf' cdts' s bs'
+                    | otherwise = M.insertWith (const $ (+1) *** IS.insert i_n)
+                                  (sn,s) (1, IS.singleton i_n) cdts
+          go mdl' ss' par' buf' cdts' i s bs'
       where
         exts = Trie.keys $ Trie.submap bs trie
         prefixing = not (null exts || exts == [bs])
@@ -251,12 +233,33 @@ countJointsM_ m0 ss0 = (S.next ss0 >>=) $ \case
       Left r -> return (m,r) -- end
       Right (s1,ss') -> (S.next ss' >>=) $ \case
         Left r -> return (m', r) -- last joint
-        Right (s2,_) | s0 == s1 && s1 == s2 -> countJointsM_ m' ss' -- even
-                     | otherwise -> go m' s1 ss' -- odd
+        Right (s2,ss'') | s0 == s1 && s1 == s2 ->
+                            countJointsM_ m' $ S.yield s2 >> ss'' -- even
+                        | otherwise -> go m' s1 $ S.yield s2 >> ss'' -- odd
         where m' = M.insertWith (+) (s0,s1) 1 m
 
-recountM :: forall m r. PrimMonad m => Doubly (PrimState m) -> (Int,Int) -> Int ->
-            Stream (Of Int) m r -> m (Map (Int, Int) Int, r)
+findJointsM :: PrimMonad m => Doubly (PrimState m) -> m (Map (Int,Int) (Int, IntSet))
+findJointsM = fmap fst . findJointsM_ M.empty . D.toStreamWithKey
+
+findJointsM_ :: Monad m => Map (Int,Int) (Int, IntSet) -> Stream (Of (Int,Sym)) m r ->
+                           m (Map (Int,Int) (Int, IntSet), r)
+findJointsM_ m0 iss0 = (S.next iss0 >>=) $ \case
+  Left r -> return (m0, r)
+  Right ((i0,s0),iss0') -> go i0 s0 m0 iss0'
+  where
+    go i0 s0 !m iss = (S.next iss >>=) $ \case
+      Left r -> return (m,r) -- end
+      Right ((i1,s1),ss') -> (S.next ss' >>=) $ \case
+        Left r -> return (m', r) -- last joint
+        Right (is2@(_,s2),ss'') -> f m' $ S.yield is2 >> ss''
+          where f | s0 == s1 && s1 == s2 = findJointsM_ -- even
+                  | otherwise            = go i1 s1     -- odd
+        where m' = M.insertWith (const $ (+1) *** IS.insert i0)
+                   (s0,s1) (1, IS.singleton i0) m
+
+recountM :: forall m r. PrimMonad m =>
+            Doubly (PrimState m) -> (Int,Int) -> Int -> Stream (Of Int) m r ->
+            m (Map (Int, Int) Int, r)
 recountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, ) <$> S.effects is0
 recountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
   s0s1ref <- newPrimRef @U.MVector (0 :: Int) -- (s0,s1) (-) (redundant)
@@ -331,3 +334,9 @@ recountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
     modifyPrimRef v f = MV.modify v f 0 -- TODO: unsafe
     readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
     readPrimRef = flip MV.read 0 -- TODO: unsafe
+
+refindM :: forall m r. PrimMonad m =>
+           Doubly (PrimState m) -> (Int,Int) -> Int -> Stream (Of Int) m r ->
+           m ( Map (Int, Int) (Int, IntSet)
+             , Map (Int, Int) (Int, IntSet), r)
+refindM = undefined -- FIXME: TODO
