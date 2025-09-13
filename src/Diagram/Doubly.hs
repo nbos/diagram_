@@ -105,60 +105,7 @@ fromStream n str = do
 -- | Read the doubly-linked list into a singly-linked list. Use toStream
 -- to not @sequence@ the reads.Applicative
 toList :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m [a]
-toList = S.toList_ . toStream
-
-toStream :: (PrimMonad m, MVector v a) =>
-            Doubly v (PrimState m) a -> Stream (Of a) m ()
-toStream (Doubly Nothing _ _ _ _) = return () -- empty
-toStream l@(Doubly (Just i0) _ _ _ _) = toStreamFrom l i0
-
-toStreamWithKey :: (PrimMonad m, MVector v a) =>
-                   Doubly v (PrimState m) a -> Stream (Of (Int,a)) m ()
-toStreamWithKey l = S.mapM (\i -> (i,) <$> read l i) $ keyStream l
-
-toStreamFrom :: (PrimMonad m, MVector v a) =>
-                Doubly v (PrimState m) a -> Int -> Stream (Of a) m ()
-toStreamFrom l@(Doubly _ _ elems _ _) = S.mapM (MV.read elems)
-                                        . keyStreamFrom l
-
--- | Stream the indexes forward from a given starting index
-keyStreamFrom :: (PrimMonad m, MVector v a) =>
-                 Doubly v (PrimState m) a -> Int -> Stream (Of Int) m ()
-keyStreamFrom (Doubly Nothing _ _ _ _) = error "Doubly.keyStreamFrom: empty list"
-keyStreamFrom (Doubly (Just i0) _ _ _ nexts) = go
-  where go i = do S.yield i
-                  nxt <- lift $ MV.read nexts i
-                  when (nxt /= i0) $ go nxt -- cont.
-
-keyStream :: (PrimMonad m, MVector v a) =>
-             Doubly v (PrimState m) a -> Stream (Of Int) m ()
-keyStream (Doubly Nothing _ _ _ _) = error "Doubly.keyStream: empty list"
-keyStream l@(Doubly (Just i0) _ _ _ _) = keyStreamFrom l i0
-
--- | Read the doubly-linked list into a singly-linked list in reverse
--- order. Use toRevStream to not @sequence@ the reads.
-toRevList :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m [a]
-toRevList = S.toList_ . toRevStream
-
-toRevStream :: (PrimMonad m, MVector v a) =>
-               Doubly v (PrimState m) a -> Stream (Of a) m ()
-toRevStream (Doubly Nothing _ _ _ _) = return () -- empty
-toRevStream l@(Doubly (Just i0) _ _ prevs _) = lift (MV.read prevs i0)
-                                               >>= toRevStreamFrom l
-
-toRevStreamFrom :: (PrimMonad m, MVector v a) =>
-                   Doubly v (PrimState m) a -> Int -> Stream (Of a) m ()
-toRevStreamFrom l@(Doubly _ _ elems _ _) = S.mapM (MV.read elems)
-                                           . revKeyStreamFrom l
-
--- | Stream the indexes forward from a given starting index
-revKeyStreamFrom :: (PrimMonad m, MVector v a) =>
-                    Doubly v (PrimState m) a -> Int -> Stream (Of Int) m ()
-revKeyStreamFrom (Doubly Nothing _ _ _ _) = error "Doubly.revKeyStreamFrom: empty list"
-revKeyStreamFrom (Doubly (Just i0) _ _ prevs _) = go
-  where go i = do S.yield i
-                  prv <- lift $ MV.read prevs i
-                  when (prv /= i0) $ go prv -- cont.
+toList = S.toList_ . stream
 
 -- | Return the index of the element preceeding the element at a given
 -- index in the list
@@ -306,3 +253,64 @@ shiftR l@(Doubly Nothing _ _ _ _) = return l
 shiftR (Doubly (Just i0) free elems prevs nexts) = do
   i_n <- MV.read prevs i0
   return $ Doubly (Just i_n) free elems prevs nexts
+
+---------------
+-- STREAMING --
+---------------
+
+stream :: (PrimMonad m, MVector v a) =>
+          Doubly v (PrimState m) a -> Stream (Of a) m ()
+stream (Doubly Nothing _ _ _ _) = return () -- empty
+stream l@(Doubly (Just i0) _ _ _ _) = streamFrom l i0
+
+streamWithKey :: (PrimMonad m, MVector v a) =>
+                 Doubly v (PrimState m) a -> Stream (Of (Index,a)) m ()
+streamWithKey l = S.mapM (\i -> (i,) <$> read l i) $ streamKeys l
+
+streamWithKeyFrom :: (PrimMonad m, MVector v a) =>
+                     Doubly v (PrimState m) a -> Index -> Stream (Of (Index,a)) m ()
+streamWithKeyFrom l = S.mapM (\i -> (i,) <$> read l i) . streamKeysFrom l
+
+streamKeys :: (PrimMonad m, MVector v a) =>
+             Doubly v (PrimState m) a -> Stream (Of Index) m ()
+streamKeys (Doubly Nothing _ _ _ _) = error "Doubly.streamKeys: empty list"
+streamKeys l@(Doubly (Just i0) _ _ _ _) = streamKeysFrom l i0
+
+streamFrom :: (PrimMonad m, MVector v a) =>
+              Doubly v (PrimState m) a -> Index -> Stream (Of a) m ()
+streamFrom l@(Doubly _ _ elems _ _) = S.mapM (MV.read elems)
+                                      . streamKeysFrom l
+
+-- | Stream the indexes forward from a given starting index
+streamKeysFrom :: (PrimMonad m, MVector v a) =>
+                  Doubly v (PrimState m) a -> Index -> Stream (Of Index) m ()
+streamKeysFrom (Doubly Nothing _ _ _ _) = error "Doubly.streamKeysFrom: empty list"
+streamKeysFrom (Doubly (Just i0) _ _ _ nexts) = go
+  where go i = do S.yield i
+                  nxt <- lift $ MV.read nexts i
+                  when (nxt /= i0) $ go nxt -- cont.
+
+-- | Read the doubly-linked list into a singly-linked list in reverse
+-- order. Use toRevStream to not @sequence@ the reads.
+toRevList :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m [a]
+toRevList = S.toList_ . revStream
+
+revStream :: (PrimMonad m, MVector v a) =>
+             Doubly v (PrimState m) a -> Stream (Of a) m ()
+revStream (Doubly Nothing _ _ _ _) = return () -- empty
+revStream l@(Doubly (Just i0) _ _ prevs _) = lift (MV.read prevs i0)
+                                               >>= revStreamFrom l
+
+revStreamFrom :: (PrimMonad m, MVector v a) =>
+                 Doubly v (PrimState m) a -> Index -> Stream (Of a) m ()
+revStreamFrom l@(Doubly _ _ elems _ _) = S.mapM (MV.read elems)
+                                         . revStreamKeysFrom l
+
+-- | Stream the indexes forward from a given starting index
+revStreamKeysFrom :: (PrimMonad m, MVector v a) =>
+                     Doubly v (PrimState m) a -> Index -> Stream (Of Index) m ()
+revStreamKeysFrom (Doubly Nothing _ _ _ _) = error "Doubly.revStreamKeysFrom: empty list"
+revStreamKeysFrom (Doubly (Just i0) _ _ prevs _) = go
+  where go i = do S.yield i
+                  prv <- lift $ MV.read prevs i
+                  when (prv /= i0) $ go prv -- cont.

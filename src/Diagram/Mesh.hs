@@ -3,9 +3,9 @@
 module Diagram.Mesh (module Diagram.Mesh) where
 
 import Control.Monad hiding (join)
-import Control.Monad.Primitive
+import Control.Monad.Primitive (PrimMonad(PrimState))
 
-import Data.Word
+import Data.Word (Word8)
 import Data.Maybe
 import Data.Tuple.Extra
 import qualified Data.List as L
@@ -22,9 +22,9 @@ import qualified Data.Vector.Unboxed as U
 import Data.Vector.Unboxed.Mutable (MVector)
 import qualified Data.Vector.Generic.Mutable as MV
 
-import Streaming as S hiding (first,second,join)
+import Streaming (Of(..), Stream, MonadIO)
 import qualified Streaming.Prelude as S
-import Diagram.Streaming () -- PrimMonad Stream instance
+import Diagram.Streaming () -- PrimMonad instance
 
 import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
@@ -63,7 +63,7 @@ extLen (Mesh (Model _ _ ks) _ _ _ _ _ sls _) =
   MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
 
 checkParity :: PrimMonad m => Doubly (PrimState m) -> m Bool
-checkParity ss = (S.next (D.toRevStream ss) >>=) $ \case
+checkParity ss = (S.next (D.revStream ss) >>=) $ \case
   Left () -> return False
   Right (sn, revRest) -> even <$> S.length_ (S.takeWhile (== sn) revRest)
 
@@ -77,7 +77,7 @@ fromStream n str = do
                          S.map fromEnum str
 
   -- check parity of end of `ss`
-  par <- (S.next (D.toRevStream ss) >>=) $ \case
+  par <- (S.next (D.revStream ss) >>=) $ \case
     Left () -> return False
     Right (sn, revRest) ->
       even <$> S.length_ (S.takeWhile (== sn) revRest)
@@ -109,14 +109,19 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
 
-  -- Can't stream these two together bc of the way recountM has to look
-  -- behind and ahead on string
+  -- TODO: these two could probably be streamed together (S.copy) making
+  -- sure each D.next is read BEFORE subst1 is called
+  i0i1s <- S.toList_ $
+           S.mapM (\i0 -> (i0 :: Index,) <$> D.next ss i0) $
+           S.each i01s
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
          withPB n01 (here "Modifying string in place") $
          S.each i01s
-  (am,rm,_) <- refindM ss' (s0,s1) s01 $
+  --
+
+  (am,rm,_) <- recountM ss' (s0,s1) s01 $
                withPB n01 (here "Computing change on candidates") $
-               S.each i01s
+               S.each i0i1s
 
   par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
@@ -220,11 +225,11 @@ countJoints_ !m s0 (s1:s2:ss)
   | otherwise = countJoints_ m' s1 (s2:ss)
   where m' = M.insertWith (+) (s0,s1) 1 m
 
-countJointsM :: Monad m => Stream (Of Int) m r -> m (Map (Int,Int) Int, r)
+countJointsM :: Monad m => Stream (Of Int) m r -> m (Map (Sym,Sym) Int, r)
 countJointsM = countJointsM_ M.empty
 
-countJointsM_ :: Monad m => Map (Int,Int) Int -> Stream (Of Int) m r ->
-                            m (Map (Int,Int) Int, r)
+countJointsM_ :: Monad m => Map (Sym,Sym) Int -> Stream (Of Int) m r ->
+                            m (Map (Sym,Sym) Int, r)
 countJointsM_ m0 ss0 = (S.next ss0 >>=) $ \case
   Left r -> return (m0, r)
   Right (s0,ss0') -> go m0 s0 ss0'
@@ -238,11 +243,11 @@ countJointsM_ m0 ss0 = (S.next ss0 >>=) $ \case
                         | otherwise -> go m' s1 $ S.yield s2 >> ss'' -- odd
         where m' = M.insertWith (+) (s0,s1) 1 m
 
-findJointsM :: PrimMonad m => Doubly (PrimState m) -> m (Map (Int,Int) (Int, IntSet))
-findJointsM = fmap fst . findJointsM_ M.empty . D.toStreamWithKey
+findJointsM :: PrimMonad m => Doubly (PrimState m) -> m (Map (Sym,Sym) (Int, IntSet))
+findJointsM = fmap fst . findJointsM_ M.empty . D.streamWithKey
 
-findJointsM_ :: Monad m => Map (Int,Int) (Int, IntSet) -> Stream (Of (Int,Sym)) m r ->
-                           m (Map (Int,Int) (Int, IntSet), r)
+findJointsM_ :: Monad m => Map (Sym,Sym) (Int, IntSet) -> Stream (Of (Int,Sym)) m r ->
+                           m (Map (Sym,Sym) (Int, IntSet), r)
 findJointsM_ m0 iss0 = (S.next iss0 >>=) $ \case
   Left r -> return (m0, r)
   Right ((i0,s0),iss0') -> go i0 s0 m0 iss0'
@@ -257,18 +262,131 @@ findJointsM_ m0 iss0 = (S.next iss0 >>=) $ \case
         where m' = M.insertWith (const $ (+1) *** IS.insert i0)
                    (s0,s1) (1, IS.singleton i0) m
 
-recountM :: forall m r. PrimMonad m =>
-            Doubly (PrimState m) -> (Int,Int) -> Int -> Stream (Of Int) m r ->
-            m (Map (Int, Int) Int, r)
-recountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, ) <$> S.effects is0
-recountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
-  s0s1ref <- newPrimRef @U.MVector (0 :: Int) -- (s0,s1) (-) (redundant)
-  s1s0ref <- newPrimRef @U.MVector (0 :: Int) -- (s1,s0) (-)
-  prevvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (i,s01) (-/+)
-  nextvec <- MV.replicate @m @U.MVector s01 (0 :: Int) -- (s01,i) (-/+)
-  s0s0ref <- newPrimRef @U.MVector (0 :: Int) -- (s0,s0) (+) (prev correction)
-  s1s1ref <- newPrimRef @U.MVector (0 :: Int) -- (s1,s1) (+) (next correction)
-  autoref <- newPrimRef @U.MVector (0 :: Int) -- (s01,s01) (+)
+-- | Compute the joints' counts and locations that need to be added
+-- (fst3) and removed (snd3) from the candidates books upon introduction
+-- of a rule (s0,s1) s01
+recountM :: forall m r. PrimMonad m => Doubly (PrimState m) -> (Sym,Sym) -> Int ->
+            Stream (Of (Index,Index)) m r -> m ( Map (Sym,Sym) (Int,IntSet)
+                                               , Map (Sym,Sym) (Int,IntSet), r)
+recountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, M.empty, )
+                                              <$> S.effects is0
+recountM ss@(D.Doubly (Just ihead) _ _ _ _) (s0,s1) s01 is0 = do
+  s0s1ref <- newPrimRef      @B.MVector     IS.empty -- (s0,s1) (-) (redundant)
+  s1s0ref <- newPrimRef      @B.MVector     IS.empty -- (s1,s0) (-)
+  prevvec <- MV.replicate @_ @B.MVector s01 IS.empty -- (i,s01) (-/+)
+  nextvec <- MV.replicate @_ @B.MVector s01 IS.empty -- (s1,i)  (-)
+  nxtvec' <- MV.replicate @_ @B.MVector s01 IS.empty -- (s01,i) (+)
+  s0s0ref <- newPrimRef      @B.MVector     IS.empty -- (s0,s0) (prev correction)
+  s1s1ref <- newPrimRef      @B.MVector     IS.empty -- (s1,s1) (+) (parity switch)
+  autoref <- newPrimRef      @B.MVector     IS.empty -- (s01,s01) (+)
+
+  -- <loop>
+  r <- case () of
+    _ -> go is0 where
+      go :: Stream (Of (Index,Index)) m r -> m r
+      go is = (S.next is >>=) $ \case
+        Left r -> return r -- end
+        Right (i0i1@(i0,_),is') -> do
+          -- prev
+          unless (i0 == ihead) $ do
+            iprev <- D.prev ss i0
+            prev <- D.read ss iprev
+            MV.modify prevvec (IS.insert iprev) prev
+            when (prev == s0) $ do -- assert (s0 /= s1)
+              n0 <- (+1) <$> S.length_ ( S.break (/= s0) $
+                                         D.revStreamFrom ss iprev )
+              when (odd n0) $ -- correct
+                modifyPrimRef s0s0ref $ IS.insert iprev
+
+          -- s0s1's
+          n <- S.length_ $ S.break (/= s01) $ D.streamFrom ss i0
+          i01s :> is'' <- S.toList $ S.splitAt n $ S.yield i0i1 >> is'
+          modifyPrimRef s0s1ref $ insertList $ fst <$> i01s
+          unless (s0 == s1) $
+            modifyPrimRef s1s0ref $ insertList $ init $ snd <$> i01s
+          modifyPrimRef autoref $ insertList $ fst . fst <$> group2 i01s
+
+          -- next
+          let (i0',i1') = last i01s
+          inext <- D.next ss i0' -- ((i0',i1') ~> i0') -> inext
+          unless (inext == ihead) $ do
+            next <- D.read ss inext
+            MV.modify nxtvec' (IS.insert i0') next -- (s01,next) (+)
+            if next /= s1
+              then MV.modify nextvec (IS.insert i1') next -- (s1,next) (-)
+              else if s0 == s1 then return () -- no (s1,next) joint
+              else do -- switch parity
+              n1 <- S.length_ $ S.break (/= s1) $ D.streamFrom ss i1'
+              i1s <- S.toList_ $ S.take n1 $ D.streamKeysFrom ss i1'
+              let evens = fst <$> group2 i1s
+                  odds = fst <$> group2 (tail i1s)
+              forM_ evens $ \i -> MV.modify nextvec (IS.insert i) s1
+              forM_ odds $ modifyPrimRef s1s1ref . IS.insert
+
+          go is'' -- continue
+  -- </loop>
+
+  amref <- newPrimRef @B.MVector M.empty
+  rmref <- newPrimRef @B.MVector M.empty
+
+  -- read --
+  readPrimRef s0s1ref >>= minsert rmref (s0,s1) -- (-)
+  readPrimRef s1s0ref >>= minsert rmref (s1,s0) -- (-)
+
+  MV.iforM_ prevvec $ minsert amref . (,s01) -- (+)
+  s0s0is <- readPrimRef s0s0ref
+  MV.modify prevvec (IS.\\ s0s0is) s0 -- correct prev[s0]
+  MV.iforM_ prevvec $ minsert rmref . (,s0) -- (-)
+
+  MV.iforM_ nextvec $ minsert rmref . (s1,)  -- (-)
+  MV.iforM_ nxtvec' $ minsert amref . (s01,) -- (+)
+
+  readPrimRef s1s1ref >>= minsert amref (s1,s1)   -- (+)
+  readPrimRef autoref >>= minsert amref (s01,s01) -- (+)
+
+  -- end --
+  liftA2 (,,r)
+    (toFst IS.size <<$>> readPrimRef amref)
+    (toFst IS.size <<$>> readPrimRef rmref)
+
+  where
+    insertList :: [Index] -> IntSet -> IntSet
+    insertList = flip $ L.foldl' $ flip IS.insert
+
+    minsert :: B.MVector (PrimState m) (Map (Sym,Sym) IntSet) ->
+               (Sym,Sym) -> IntSet -> m ()
+    minsert m key is = unless (IS.null is) $ modifyPrimRef m $
+                       M.insertWith (const $ IS.union is) key is
+
+    -- pair consecutive items (non-overlapping)
+    group2 :: [a] -> [(a,a)]
+    group2 (a0:a1:as) = (a0,a1):group2 as
+    group2 _ = []
+
+    newPrimRef :: MV.MVector v a => a -> m (v (PrimState m) a)
+    newPrimRef = MV.replicate 1
+    modifyPrimRef :: MV.MVector v a => v (PrimState m) a -> (a -> a) -> m ()
+    modifyPrimRef v f = MV.unsafeModify v f 0
+    readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
+    readPrimRef = flip MV.unsafeRead 0
+
+-- | Return a map of the differences of counts of affected joints upon
+-- introduction of the given rule and the modified (constructed/updated)
+-- symbol string. Naive because it reads the whole string for matches of
+-- the introduced rule. Use @recountM@ if you know the indices of the
+-- construction sites.
+naiveRecountM :: forall m r. PrimMonad m =>
+                 Doubly (PrimState m) -> (Sym,Sym) -> Int ->
+                 Stream (Of Int) m r -> m (Map (Int, Int) Int, r)
+naiveRecountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, ) <$> S.effects is0
+naiveRecountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
+  s0s1ref <- newPrimRef      @U.MVector     0 -- (s0,s1) (-) (redundant)
+  s1s0ref <- newPrimRef      @U.MVector     0 -- (s1,s0) (-)
+  prevvec <- MV.replicate @_ @U.MVector s01 0 -- (i,s01) (-/+)
+  nextvec <- MV.replicate @_ @U.MVector s01 0 -- (s01,i) (-/+)
+  s0s0ref <- newPrimRef      @U.MVector     0 -- (s0,s0) (+) (prev[s0] correction)
+  s1s1ref <- newPrimRef      @U.MVector     0 -- (s1,s1) (+) (next[s1] correction)
+  autoref <- newPrimRef      @U.MVector     0 -- (s01,s01) (+)
 
   -- <loop>
   r <- case () of
@@ -278,35 +396,34 @@ recountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
         Left r -> return r -- end
         Right (i,is') -> do
           -- prev
-          when (i /= i0) $ do
+          unless (i == i0) $ do
             iprev <- D.prev ss i
             prev <- D.read ss iprev
             MV.modify prevvec (+1) prev
-            when (prev == s0) $ do -- s0 /= s1
+            when (prev == s0) $ do -- assert (s0 /= s1)
               n0 <- (+1) <$> S.length_ ( S.break (/= s0) $
-                                         D.toRevStreamFrom ss iprev )
+                                         D.revStreamFrom ss iprev )
               when (odd n0) $ modifyPrimRef s0s0ref (+1) -- correct
 
           -- s0s1's
-          n <- S.length_ $ S.break (/= s01) $ D.toStreamFrom ss i
+          n <- S.length_ $ S.break (/= s01) $ D.streamFrom ss i
           modifyPrimRef s0s1ref (+n)
           when (s0 /= s1) $ modifyPrimRef s1s0ref (+(n-1))
           modifyPrimRef autoref (+(n `div` 2))
 
           -- next
           (S.next (S.drop (n-1) $ S.yield i >> is') >>=) $ \case
-            Left r -> return r -- nothing after, end
+            Left r -> return r -- impossible?
             Right (i',is'') -> do
               inext <- D.next ss i'
-              when (inext /= i0) $ do
+              unless (inext == i0) $ do
                 next <- D.read ss inext
                 MV.modify nextvec (+1) next
-                when (next == s1) $ do
-                  if s0 == s1 then modifyPrimRef s1s1ref (+1) -- even nnext
-                    else do
-                    nnext <- (+1) <$> S.length_ ( S.break (/= next) $
-                                                  D.toStreamFrom ss inext)
-                    when (odd nnext) $ modifyPrimRef s1s1ref (+1)
+                when (next == s1) $ do -- check parity
+                  n1 <- if s0 == s1 then return 3
+                        else do (+1) <$> S.length_ ( S.break (/= s1) $
+                                                     D.streamFrom ss inext)
+                  when (odd n1) $ modifyPrimRef s1s1ref (+1) -- -1+1 == 0
               go is'' -- continue
   -- </loop>
 
@@ -334,9 +451,3 @@ recountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
     modifyPrimRef v f = MV.modify v f 0 -- TODO: unsafe
     readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
     readPrimRef = flip MV.read 0 -- TODO: unsafe
-
-refindM :: forall m r. PrimMonad m =>
-           Doubly (PrimState m) -> (Int,Int) -> Int -> Stream (Of Int) m r ->
-           m ( Map (Int, Int) (Int, IntSet)
-             , Map (Int, Int) (Int, IntSet), r)
-refindM = undefined -- FIXME: TODO
