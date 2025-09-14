@@ -6,7 +6,7 @@ import System.IO (hClose, hFileSize, hFlush, hPutStrLn, openFile, IOMode(WriteMo
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName)
 import System.Environment (getArgs)
-import System.Exit (exitFailure, exitSuccess)
+import System.Exit (exitFailure)
 
 import Control.Monad
 
@@ -44,8 +44,9 @@ main = do
                     ++ "-run-" ++ timestamp ++ ".csv"
   csvHandle <- openFile logFilePath WriteMode
 
-  (msh0, asrc0) <- Mesh.fromStream maxStrLen $
-                   withPB maxStrLen "Initializing mesh" $
+  let strLen = min maxStrLen $ fromInteger srcLen
+  (msh0, asrc0) <- Mesh.fromStream strLen $
+                   withPB strLen "Initializing mesh" $
                    S.splitAt maxStrLen $
                    Q.unpack $ Q.fromHandle srcHandle
   -- <main loop>
@@ -66,7 +67,7 @@ main = do
           S.each $ M.toList cdts
 
         putStrLn $ here "Sorting candidates..."
-        (loss,((s0,s1),(n01,_))) <- case L.sort cdtList of
+        (minLoss,((s0,s1),(n01,_))) <- case L.sort cdtList of
           [] -> error "no candidates"
           (c@(loss,_):cdts') -> do
             when (loss < 0) $ putStrLn $ here $
@@ -81,6 +82,7 @@ main = do
             approxRatio = approxInfo / origInfo
             approxFactor = recip approxRatio
 
+        -- STDOUT
         putStrLn $ here $ "LEN: " ++
           printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
                   ++ "factor: %.4f, over %.2f%% of input")
@@ -93,6 +95,7 @@ main = do
           approxFactor
           (100 * recip scale)
 
+        -- CSV
         hPutStrLn csvHandle $
           printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
           (R.numSymbols rs) approxFactor -- %d, %.4f
@@ -101,7 +104,7 @@ main = do
           (ceiling @_ @Int nInfo) -- %d
           (ceiling @_ @Int ksInfo) -- %d
           (ceiling @_ @Int ssInfo) -- %d
-          s0 s1 n01 loss -- %d, %d, %d, %f
+          s0 s1 n01 minLoss -- %d, %d, %d, %f
           (R.toEscapedString rs [s0])
           (R.toEscapedString rs [s1])
           (R.toEscapedString rs [s0,s1])
@@ -109,14 +112,14 @@ main = do
         putStrLn ""
         -- </log stats>
 
-        if loss > 0
+        if minLoss > 0
           then putStrLn (here "Reached minimum. Terminating.")
-               >> hClose csvHandle
-               >> exitSuccess
+               >> hClose csvHandle -- end
 
           else Mesh.pushRule msh (s0,s1)
                >>= flip fill src . snd
                >>= uncurry go -- (msh'', src')
+
   -- </main loop>
   where
     fill msh src

@@ -1,6 +1,8 @@
 {-# LANGUAGE TupleSections #-}
 module Diagram.Model (module Diagram.Model) where
 
+import System.Exit (exitFailure)
+
 import Control.Monad.ST
 import Control.Monad
 import Control.Monad.Primitive (PrimMonad(PrimState))
@@ -320,6 +322,7 @@ printApproxReport rs n src = do
     print numSymbols
     putStr "ksReal: " >> print ksReal
     putStr "ksDecoded: " >> print ksDecoded
+    exitFailure
 
   -- ss valid.
   let ssCodeLen = BV.length ssCode
@@ -332,12 +335,7 @@ printApproxReport rs n src = do
   when (Just ssReal /= ssDecoded) $ do
     putStr "ssReal: " >> print ssReal
     putStr "ssDecoded: " >> print ssDecoded
-
-
-
-
-
-
+    exitFailure
 
 -- -- GRAVEYARD --
 -- -- | Code length in bits of the serialization of the model

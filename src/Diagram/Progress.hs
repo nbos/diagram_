@@ -42,10 +42,11 @@ newPB n message = newProgressBar style 10 (Progress 0 n ())
     exactLen = 2*nLen + 1
     message' = padOrTruncate (width - exactLen) message
     style = defStyle{
-      stylePrefix = msg (Text.pack message' <> " ") <> exact,
-      stylePostfix = percentage <> msg " ETA: "
-                     <> remainingTime renderDuration "00"
-                     <> msg " DUR: " <> elapsedTime renderDuration,
+      stylePrefix = msg (Text.pack message' <> " ") <> exact
+                    <> msg " " <> percentage,
+                    -- <> msg " ETA: " <> remainingTime renderDuration "00"
+                    -- <> msg " DUR: " <> elapsedTime renderDuration,
+      stylePostfix = mempty,
       styleDone = '#',
       styleCurrent = '#',
       styleTodo = '-' }
@@ -56,10 +57,11 @@ newPB' :: String -> IO (ProgressBar ())
 newPB' message = newProgressBar style 10 (Progress 0 (2^(28::Int)) ())
   where
     style = defStyle{
-      stylePrefix = msg (Text.pack message <> " ") <> customExact,
-      stylePostfix = customPercentage <> msg " ETA: "
-                     <> customETA
-                     <> msg " DUR: " <> elapsedTime renderDuration,
+      stylePrefix = msg (Text.pack message <> " ") <> customExact
+                    <> msg " " <> customPercentage,
+                    -- <> msg " ETA: " <> customETA
+                    -- <> msg " DUR: " <> elapsedTime renderDuration,
+      stylePostfix = mempty,
       styleDone = '#',
       styleCurrent = '#',
       styleTodo = '-' }
@@ -68,7 +70,7 @@ newPB' message = newProgressBar style 10 (Progress 0 (2^(28::Int)) ())
       Text.pack $ show (progressDone progress) ++ "/??"
     
     customPercentage = Label $ \_ _ -> "??"
-    customETA = Label $ \_ _ -> "∞"
+    -- customETA = Label $ \_ _ -> "∞"
 
 padOrTruncate :: Int -> String -> String
 padOrTruncate width str = case compare len width of
