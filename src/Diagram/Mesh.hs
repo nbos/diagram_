@@ -158,19 +158,19 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
     go !mdl !ss !par !buf !cdts !i_n !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
           return $ Mesh mdl ss par buf rsm trie sls cdts -- end
-      | otherwise = do
-          let i = fromJust $ D.head buf
-          s <- D.read buf i
+      | otherwise = do -- assert $ not (D.null buf || D.null ss) 
+          let i0buf = fromJust $ D.head buf
+          s <- D.read buf i0buf
           mdl' <- Mdl.incCount mdl s
-          ss' <- fromJust <$> D.trySnoc ss s
-          buf' <- D.delete buf i
+          (i_n', ss') <- fromJust <$> D.trySnoc ss s
+          buf' <- D.delete buf i0buf
           let len = R.symbolLength rs s
               bs' = BS.drop len bs
               par' = s /= sn || not par -- if s == sn then not par else True
               cdts' | s == sn && not par = cdts
                     | otherwise = M.insertWith (const $ (+1) *** IS.insert i_n)
                                   (sn,s) (1, IS.singleton i_n) cdts
-          go mdl' ss' par' buf' cdts' i s bs'
+          go mdl' ss' par' buf' cdts' i_n' s bs'
       where
         exts = Trie.keys $ Trie.submap bs trie
         prefixing = not (null exts || exts == [bs])
@@ -198,7 +198,7 @@ snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _ _) s = do
                     -- ...over composite suffixes of s0
                     init $ R.suffixes rs s0
 
-      _else -> D.snoc buf s1
+      _else -> snd <$> D.snoc buf s1
 
 -------------
 -- HELPERS --

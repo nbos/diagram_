@@ -207,20 +207,19 @@ tryCons a (Doubly (Just i0) (i:free) elems prevs nexts) = do
 -- case there are no free spaces.
 -- TODO: return index?
 snoc :: (PrimMonad m, MVector v a) =>
-        Doubly v (PrimState m) a -> a -> m (Doubly v (PrimState m) a)
+        Doubly v (PrimState m) a -> a -> m (Index, Doubly v (PrimState m) a)
 snoc l a = trySnoc l a >>= maybe (grow l >>= flip snoc a) return
 
 -- | Try to append an element to the end of the list, if the capacity
--- allows it.
--- TODO: return index?
-trySnoc :: (PrimMonad m, MVector v a) =>
-           Doubly v (PrimState m) a -> a -> m (Maybe (Doubly v (PrimState m) a))
+-- allows it. Returns the index of the appended element.
+trySnoc :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> a ->
+           m (Maybe (Index, Doubly v (PrimState m) a))
 trySnoc (Doubly _ [] _ _ _) _ = return Nothing
 trySnoc (Doubly Nothing (i:free) elems prevs nexts) a = do
   MV.write elems i a
   MV.write nexts i i
   MV.write prevs i i
-  return $ Just $ Doubly (Just i) free elems prevs nexts
+  return $ Just (i, Doubly (Just i) free elems prevs nexts)
 
 trySnoc (Doubly (Just i0) (i:free) elems prevs nexts) a = do
   -- i0 (head)
@@ -235,7 +234,7 @@ trySnoc (Doubly (Just i0) (i:free) elems prevs nexts) a = do
   MV.write prevs i i_n
   MV.write nexts i i0
 
-  return $ Just $ Doubly (Just i0) free elems prevs nexts
+  return $ Just (i, Doubly (Just i0) free elems prevs nexts)
 {-# INLINABLE trySnoc #-}
 
 -- | Shift the list left by 1, placing the first element last
