@@ -7,13 +7,14 @@ import Prelude hiding (read)
 import Control.Monad
 import Control.Monad.Primitive (PrimMonad(PrimState))
 
-import Streaming
-import qualified Streaming.Prelude as S
-
 import Data.Maybe
+import qualified Data.IntSet as IS
 import qualified Data.Vector.Unboxed as U
 import Data.Vector.Generic.Mutable (MVector)
 import qualified Data.Vector.Generic.Mutable as MV
+
+import Streaming
+import qualified Streaming.Prelude as S
 
 type Index = Int
 data Doubly v s a = Doubly
@@ -22,6 +23,34 @@ data Doubly v s a = Doubly
   !(v s a)             -- ^ elements
   !(U.MVector s Index) -- ^ previous indexes
   !(U.MVector s Index) -- ^ next indexes
+
+checkIntegrity :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m ()
+checkIntegrity l@(Doubly _ free elems _ _) = do
+  fwd <- S.toList_ $ streamKeys l
+  bwd <- S.toList_ $ revStreamKeys l
+  when (reverse bwd /= fwd) $ err $ "BWD keys is not the reverse of FWD keys:\n"
+    ++ "FWD: " ++ show fwd ++ "\nBWD: " ++ show bwd
+
+  let keySet = IS.fromList fwd
+      freeSet = IS.fromList free
+      indexSet = IS.fromList [0..MV.length elems - 1]
+
+  when (IS.size keySet /= length fwd) $ err $ "Key set contains duplicates: "
+    ++ show fwd
+  when (IS.size freeSet /= length free) $ err $ "Free set contains duplicates: "
+    ++ show free
+  when (IS.union keySet freeSet /= indexSet) $ err $
+    "Some keys missing absent from both key and free set: "
+    ++ show (IS.toList $ (indexSet IS.\\ keySet) IS.\\ freeSet)
+  unless (IS.null $ IS.intersection keySet freeSet) $ err $
+    "Key and free set intersect: " ++ show (IS.intersection keySet freeSet)
+
+  -- verify value initialization
+  as <- S.toList_ $ stream l
+  return $ foldr ((.) . seq) id as ()
+
+  where
+    err = error . (++) "Doubly.checkIntegrity: "
 
 -- | Allocate a new list of the given size with undefined values
 new :: (PrimMonad m, MVector v a) => Int -> m (Doubly v (PrimState m) a)
@@ -272,7 +301,7 @@ streamWithKeyFrom l = S.mapM (\i -> (i,) <$> read l i) . streamKeysFrom l
 
 streamKeys :: (PrimMonad m, MVector v a) =>
              Doubly v (PrimState m) a -> Stream (Of Index) m ()
-streamKeys (Doubly Nothing _ _ _ _) = error "Doubly.streamKeys: empty list"
+streamKeys (Doubly Nothing _ _ _ _) = return () -- empty
 streamKeys l@(Doubly (Just i0) _ _ _ _) = streamKeysFrom l i0
 
 streamFrom :: (PrimMonad m, MVector v a) =>
@@ -298,12 +327,18 @@ revStream :: (PrimMonad m, MVector v a) =>
              Doubly v (PrimState m) a -> Stream (Of a) m ()
 revStream (Doubly Nothing _ _ _ _) = return () -- empty
 revStream l@(Doubly (Just i0) _ _ prevs _) = lift (MV.read prevs i0)
-                                               >>= revStreamFrom l
+                                             >>= revStreamFrom l
 
 revStreamFrom :: (PrimMonad m, MVector v a) =>
                  Doubly v (PrimState m) a -> Index -> Stream (Of a) m ()
 revStreamFrom l@(Doubly _ _ elems _ _) = S.mapM (MV.read elems)
                                          . revStreamKeysFrom l
+
+revStreamKeys :: (PrimMonad m, MVector v a) =>
+                 Doubly v (PrimState m) a -> Stream (Of Index) m ()
+revStreamKeys (Doubly Nothing _ _ _ _) = return () -- empty
+revStreamKeys l@(Doubly (Just i0) _ _ prevs _) = lift (MV.read prevs i0)
+                                                 >>= revStreamKeysFrom l
 
 -- | Stream the indexes forward from a given starting index
 revStreamKeysFrom :: (PrimMonad m, MVector v a) =>
@@ -312,4 +347,4 @@ revStreamKeysFrom (Doubly Nothing _ _ _ _) = error "Doubly.revStreamKeysFrom: em
 revStreamKeysFrom (Doubly (Just i0) _ _ prevs _) = go
   where go i = do S.yield i
                   prv <- lift $ MV.read prevs i
-                  when (prv /= i0) $ go prv -- cont.
+                  if prv == i0 then S.yield i0 else go prv -- cont.
