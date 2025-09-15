@@ -2,6 +2,8 @@
 {-# LANGUAGE TupleSections, BangPatterns, LambdaCase, TypeApplications #-}
 module Diagram.Mesh (module Diagram.Mesh) where
 
+import Prelude hiding (read)
+
 import Control.Monad hiding (join)
 import Control.Monad.Primitive (PrimMonad(PrimState))
 
@@ -11,6 +13,7 @@ import Data.Tuple.Extra
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import qualified Data.Set as Set
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IS
 import Data.Trie (Trie)
@@ -22,7 +25,7 @@ import qualified Data.Vector.Unboxed as U
 import Data.Vector.Unboxed.Mutable (MVector)
 import qualified Data.Vector.Generic.Mutable as MV
 
-import Streaming (Of(..), Stream, MonadIO)
+import Streaming hiding (second,join)
 import qualified Streaming.Prelude as S
 import Diagram.Streaming () -- PrimMonad instance
 
@@ -105,23 +108,27 @@ sortCandidates (Mesh mdl _ _ _ _ _ _ cdts) scale =
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
 pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
+  () <- D.checkIntegrity ss
+  cdtsRef <- findJointsM ss
+  when (cdts /= cdtsRef) $ do
+    let cdtsSet = Set.fromList $ M.toList cdts
+        refSet = Set.fromList $ M.toList cdtsRef
+    liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
+    liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
+    liftIO (putStr "buf: ") >> D.toList buf >>= (liftIO . print)
+    error "before substitution"
+
   (s01, mdl') <- Mdl.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
 
-  -- TODO: these two could probably be streamed together (S.copy) making
-  -- sure each D.next is read BEFORE subst1 is called
-  i0i1s <- S.toList_ $
-           S.mapM (\i0 -> (i0 :: Index,) <$> D.next ss i0) $
-           S.each i01s
+  ((am,rm),_) <- constr (s0,s1) s01 ss $
+                 withPB n01 (here "Computing change on candidates") $
+                 S.each i01s
+
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
          withPB n01 (here "Modifying string in place") $
          S.each i01s
-  --
-
-  (am,rm,_) <- recountM ss' (s0,s1) s01 $
-               withPB n01 (here "Computing change on candidates") $
-               S.each i0i1s
 
   par' <- checkParity ss'
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
@@ -129,6 +136,19 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
 
   let cdts' = M.mergeWithKey (const join) id id am $
               M.mergeWithKey (const diff) id id cdts rm
+
+  liftIO $ putStr "am: " >> print am
+  liftIO $ putStr "rm: " >> print rm
+
+  () <- D.checkIntegrity ss'
+  cdtsRef' <- findJointsM ss'
+  when (cdts' /= cdtsRef') $ do
+    let cdtsSet = Set.fromList $ M.toList cdts'
+        refSet = Set.fromList $ M.toList cdtsRef'
+    liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
+    liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
+    error "after substitution"
+
   (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
 
   where
@@ -139,6 +159,154 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
     bs01 = R.bytestring rs s0 <> R.bytestring rs s1
     trie' = Trie.insert bs01 () trie
     sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
+
+type Boxed = B.MVector
+
+-- | Given a construction rule `(s0,s1) ==> s01`, a list and a stream of
+-- the indices of the construction sites, compute the changes
+-- (added,subtracted) to apply to candidates\/joints counts\/locations
+-- were the constructions to take place assuming that the construction
+-- substitutes the left (s0) part of the joint and the right part (s1)
+-- gets freed.
+constr :: forall m r. PrimMonad m => (Sym,Sym) -> Sym ->
+          Doubly (PrimState m) -> Stream (Of Index) m r ->
+          m (( Map (Sym,Sym) (Int,IntSet)
+             , Map (Sym,Sym) (Int,IntSet) ), r)
+
+constr _ _ (D.Doubly Nothing _ _ _ _) is0 = (( M.empty
+                                             , M.empty ), ) <$> S.effects is0
+
+constr (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
+  s0s1ref <- newPrimRef      @Boxed     IS.empty -- (s0,s1) (-) (redundant)
+  s1s0ref <- newPrimRef      @Boxed     IS.empty -- (s1,s0) (-)
+  prevvec <- MV.replicate @_ @Boxed s01 IS.empty -- (i,s01) (-/+)
+  nextvec <- MV.replicate @_ @Boxed s01 IS.empty -- (s1,i)  (-)
+  nxtvec' <- MV.replicate @_ @Boxed s01 IS.empty -- (s01,i) (+)
+  s0s0ref <- newPrimRef      @Boxed     IS.empty -- (s0,s0) (prev correction)
+  s1s1ref <- newPrimRef      @Boxed     IS.empty -- (s1,s1) (+) (parity switch)
+  autoref <- newPrimRef      @Boxed     IS.empty -- (s01,s01) (+)
+
+  -- <loop>
+  r <- case () of
+    _ -> go is0 where
+      go :: Stream (Of Index) m r -> m r
+      go is = (S.next is >>=) $ \case
+        Left r -> return r -- end
+        Right (i0,is') -> do
+          iprev <- prevOf i0
+          prev <- read iprev
+
+          -- skip sites that immediately follow a site (operate on chunks)
+          ipprev <- prevOf iprev
+          pprev <- read ipprev
+          let preceededByConstr = (pprev, prev) == (s0, s1)
+                                  && i0 /= ihead
+                                  && iprev /= ihead
+          if preceededByConstr then go is' else do
+
+            -- prev
+            unless (i0 == ihead) $ do
+              MV.modify prevvec (IS.insert iprev) prev
+              when (prev == s0) $ do -- assert (s0 /= s1)
+                n0 <- (+1) <$> S.length_ ( S.break (/= s0) $
+                                           D.revStreamFrom ss iprev )
+                when (odd n0) $ -- correct
+                  modifyPrimRef s0s0ref $ IS.insert iprev
+
+            -- s0s1's
+            n <- S.length_ $ S.span (== (s0,s1)) $ sChunks2 $ D.streamFrom ss i0
+            i0i1s <- S.toList_ $ S.splitAt n $ sChunks2 $ D.streamKeysFrom ss i0
+            modifyPrimRef s0s1ref $ insertList $ fst <$> i0i1s
+            unless (s0 == s1) $
+              modifyPrimRef s1s0ref $ insertList $ init $ snd <$> i0i1s
+            modifyPrimRef autoref $ insertList $ fst . fst <$> lChunks2 i0i1s
+
+            -- next
+            let (i0',i1') = last i0i1s
+            inext <- nextOf i1' -- ((i0',i1') ~> i0') -> inext
+            unless (inext == ihead) $ do
+              next <- read inext
+              MV.modify nxtvec' (IS.insert i0') next -- (s01,next) (+)
+              if next /= s1 then MV.modify nextvec (IS.insert i1') next -- (s1,next) (-)
+                else if s0 == s1 then return () -- there was no (s1,next) joint
+                else do -- switch parity
+                n1 <- S.length_ $ S.break (/= s1) $ D.streamFrom ss i1'
+                i1s <- S.toList_ $ S.take n1 $ D.streamKeysFrom ss i1'
+                let evens = fst <$> lChunks2 i1s
+                    odds = fst <$> lChunks2 (tail i1s)
+                forM_ evens $ \i -> MV.modify nextvec (IS.insert i) s1
+                forM_ odds $ modifyPrimRef s1s1ref . IS.insert
+
+            go is' -- continue
+  -- </loop>
+
+  amref <- newPrimRef @Boxed M.empty
+  rmref <- newPrimRef @Boxed M.empty
+
+  -- read --
+  readPrimRef s0s1ref >>= minsert rmref (s0,s1) -- (-)
+  readPrimRef s1s0ref >>= minsert rmref (s1,s0) -- (-)
+
+  MV.iforM_ prevvec $ minsert amref . (,s01) -- (+)
+  s0s0is <- readPrimRef s0s0ref
+  MV.modify prevvec (IS.\\ s0s0is) s0 -- correct prev[s0]
+  MV.iforM_ prevvec $ minsert rmref . (,s0) -- (-)
+
+  MV.iforM_ nextvec $ minsert rmref . (s1,)  -- (-)
+  MV.iforM_ nxtvec' $ minsert amref . (s01,) -- (+)
+
+  readPrimRef s1s1ref >>= minsert amref (s1,s1)   -- (+)
+  readPrimRef autoref >>= minsert amref (s01,s01) -- (+)
+
+  -- end --
+  am <- toFst IS.size <<$>> readPrimRef amref
+  rm <- toFst IS.size <<$>> readPrimRef rmref
+  return ((am,rm),r)
+
+  where
+    prevOf :: Index -> m Index
+    prevOf = D.prev ss
+
+    nextOf :: Index -> m Index
+    nextOf = D.next ss
+
+    read :: Index -> m Sym
+    read = D.read ss
+
+    insertList :: [Index] -> IntSet -> IntSet
+    insertList = flip $ L.foldl' $ flip IS.insert
+
+    minsert :: Boxed (PrimState m) (Map (Sym,Sym) IntSet) ->
+               (Sym,Sym) -> IntSet -> m ()
+    minsert m key is = unless (IS.null is) $ modifyPrimRef m $
+                       M.insertWith (const $ IS.union is) key is
+
+    -- pair consecutive items (non-overlapping) of a list
+    lChunks2 :: [a] -> [(a,a)]
+    lChunks2 (a0:a1:as) = (a0,a1):lChunks2 as
+    lChunks2 _ = []
+
+    -- pair consecutive items (non-overlapping) of a stream
+    sChunks2 :: Stream (Of a) m r' -> Stream (Of (a,a)) m r'
+    sChunks2 str = (lift (S.next str) >>=) $ \case
+      Left r -> return r
+      Right (a,str') -> (lift (S.next str') >>=) $ \case
+        Left r -> return r
+        Right (a',str'') -> S.yield (a,a') >> sChunks2 str''
+
+    newPrimRef :: MV.MVector v a => a -> m (v (PrimState m) a)
+    newPrimRef = MV.replicate 1
+    modifyPrimRef :: MV.MVector v a => v (PrimState m) a -> (a -> a) -> m ()
+    modifyPrimRef v f = MV.unsafeModify v f 0
+    readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
+    readPrimRef = flip MV.unsafeRead 0
+
+-- | Substitute the symbol at the given index and the next with the
+-- given symbol
+subst1 :: PrimMonad m => Sym -> Doubly (PrimState m) -> Index ->
+                         m (Doubly (PrimState m))
+subst1 s01 l i = D.modify l (const s01) i >>
+                 D.next l i >>= D.delete l
 
 -- | While there is free space in the symbol string and the buffer is
 -- not the prefix of any potential symbol, append the fully constructed
@@ -158,7 +326,7 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
     go !mdl !ss !par !buf !cdts !i_n !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
           return $ Mesh mdl ss par buf rsm trie sls cdts -- end
-      | otherwise = do -- assert $ not (D.null buf || D.null ss) 
+      | otherwise = do -- assert $ not (D.null buf || D.null ss)
           let i0buf = fromJust $ D.head buf
           s <- D.read buf i0buf
           mdl' <- Mdl.incCount mdl s
@@ -200,16 +368,9 @@ snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _ _) s = do
 
       _else -> snd <$> D.snoc buf s1
 
--------------
--- HELPERS --
--------------
-
--- | Substitute the symbol at the given index and the next with the
--- given symbol
-subst1 :: PrimMonad m => Sym -> Doubly (PrimState m) -> Index ->
-                         m (Doubly (PrimState m))
-subst1 s01 l i = D.modify l (const s01) i >>
-                 D.next l i >>= D.delete l
+---------------
+-- GRAVEYARD --
+---------------
 
 countJoints :: [Int] -> Map (Sym,Sym) Int
 countJoints [] = M.empty
@@ -261,114 +422,6 @@ findJointsM_ m0 iss0 = (S.next iss0 >>=) $ \case
                   | otherwise            = go i1 s1     -- odd
         where m' = M.insertWith (const $ (+1) *** IS.insert i0)
                    (s0,s1) (1, IS.singleton i0) m
-
--- | Compute the joints' counts and locations that need to be added
--- (fst3) and removed (snd3) from the candidates books upon introduction
--- of a rule (s0,s1) s01
-recountM :: forall m r. PrimMonad m => Doubly (PrimState m) -> (Sym,Sym) -> Int ->
-            Stream (Of (Index,Index)) m r -> m ( Map (Sym,Sym) (Int,IntSet)
-                                               , Map (Sym,Sym) (Int,IntSet), r)
-recountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, M.empty, )
-                                              <$> S.effects is0
-recountM ss@(D.Doubly (Just ihead) _ _ _ _) (s0,s1) s01 is0 = do
-  s0s1ref <- newPrimRef      @B.MVector     IS.empty -- (s0,s1) (-) (redundant)
-  s1s0ref <- newPrimRef      @B.MVector     IS.empty -- (s1,s0) (-)
-  prevvec <- MV.replicate @_ @B.MVector s01 IS.empty -- (i,s01) (-/+)
-  nextvec <- MV.replicate @_ @B.MVector s01 IS.empty -- (s1,i)  (-)
-  nxtvec' <- MV.replicate @_ @B.MVector s01 IS.empty -- (s01,i) (+)
-  s0s0ref <- newPrimRef      @B.MVector     IS.empty -- (s0,s0) (prev correction)
-  s1s1ref <- newPrimRef      @B.MVector     IS.empty -- (s1,s1) (+) (parity switch)
-  autoref <- newPrimRef      @B.MVector     IS.empty -- (s01,s01) (+)
-
-  -- <loop>
-  r <- case () of
-    _ -> go is0 where
-      go :: Stream (Of (Index,Index)) m r -> m r
-      go is = (S.next is >>=) $ \case
-        Left r -> return r -- end
-        Right (i0i1@(i0,_),is') -> do
-          -- prev
-          unless (i0 == ihead) $ do
-            iprev <- D.prev ss i0
-            prev <- D.read ss iprev
-            MV.modify prevvec (IS.insert iprev) prev
-            when (prev == s0) $ do -- assert (s0 /= s1)
-              n0 <- (+1) <$> S.length_ ( S.break (/= s0) $
-                                         D.revStreamFrom ss iprev )
-              when (odd n0) $ -- correct
-                modifyPrimRef s0s0ref $ IS.insert iprev
-
-          -- s0s1's
-          n <- S.length_ $ S.break (/= s01) $ D.streamFrom ss i0
-          i01s :> is'' <- S.toList $ S.splitAt n $ S.yield i0i1 >> is'
-          modifyPrimRef s0s1ref $ insertList $ fst <$> i01s
-          unless (s0 == s1) $
-            modifyPrimRef s1s0ref $ insertList $ init $ snd <$> i01s
-          modifyPrimRef autoref $ insertList $ fst . fst <$> group2 i01s
-
-          -- next
-          let (i0',i1') = last i01s
-          inext <- D.next ss i0' -- ((i0',i1') ~> i0') -> inext
-          unless (inext == ihead) $ do
-            next <- D.read ss inext
-            MV.modify nxtvec' (IS.insert i0') next -- (s01,next) (+)
-            if next /= s1
-              then MV.modify nextvec (IS.insert i1') next -- (s1,next) (-)
-              else if s0 == s1 then return () -- no (s1,next) joint
-              else do -- switch parity
-              n1 <- S.length_ $ S.break (/= s1) $ D.streamFrom ss i1'
-              i1s <- S.toList_ $ S.take n1 $ D.streamKeysFrom ss i1'
-              let evens = fst <$> group2 i1s
-                  odds = fst <$> group2 (tail i1s)
-              forM_ evens $ \i -> MV.modify nextvec (IS.insert i) s1
-              forM_ odds $ modifyPrimRef s1s1ref . IS.insert
-
-          go is'' -- continue
-  -- </loop>
-
-  amref <- newPrimRef @B.MVector M.empty
-  rmref <- newPrimRef @B.MVector M.empty
-
-  -- read --
-  readPrimRef s0s1ref >>= minsert rmref (s0,s1) -- (-)
-  readPrimRef s1s0ref >>= minsert rmref (s1,s0) -- (-)
-
-  MV.iforM_ prevvec $ minsert amref . (,s01) -- (+)
-  s0s0is <- readPrimRef s0s0ref
-  MV.modify prevvec (IS.\\ s0s0is) s0 -- correct prev[s0]
-  MV.iforM_ prevvec $ minsert rmref . (,s0) -- (-)
-
-  MV.iforM_ nextvec $ minsert rmref . (s1,)  -- (-)
-  MV.iforM_ nxtvec' $ minsert amref . (s01,) -- (+)
-
-  readPrimRef s1s1ref >>= minsert amref (s1,s1)   -- (+)
-  readPrimRef autoref >>= minsert amref (s01,s01) -- (+)
-
-  -- end --
-  liftA2 (,,r)
-    (toFst IS.size <<$>> readPrimRef amref)
-    (toFst IS.size <<$>> readPrimRef rmref)
-
-  where
-    insertList :: [Index] -> IntSet -> IntSet
-    insertList = flip $ L.foldl' $ flip IS.insert
-
-    minsert :: B.MVector (PrimState m) (Map (Sym,Sym) IntSet) ->
-               (Sym,Sym) -> IntSet -> m ()
-    minsert m key is = unless (IS.null is) $ modifyPrimRef m $
-                       M.insertWith (const $ IS.union is) key is
-
-    -- pair consecutive items (non-overlapping)
-    group2 :: [a] -> [(a,a)]
-    group2 (a0:a1:as) = (a0,a1):group2 as
-    group2 _ = []
-
-    newPrimRef :: MV.MVector v a => a -> m (v (PrimState m) a)
-    newPrimRef = MV.replicate 1
-    modifyPrimRef :: MV.MVector v a => v (PrimState m) a -> (a -> a) -> m ()
-    modifyPrimRef v f = MV.unsafeModify v f 0
-    readPrimRef :: MV.MVector v a => v (PrimState m) a -> m a
-    readPrimRef = flip MV.unsafeRead 0
 
 -- | Return a map of the differences of counts of affected joints upon
 -- introduction of the given rule and the modified (constructed/updated)
