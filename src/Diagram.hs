@@ -33,18 +33,18 @@ main = do
              exitFailure
 
   srcHandle <- openFile filename ReadMode
-  srcLen <- hFileSize srcHandle -- number of atoms in the source
-  let origCodeLen = srcLen * 8 -- in bits
+  srcByteLen <- hFileSize srcHandle -- number of atoms in the source
+  let origCodeLen = srcByteLen * 8 -- in bits
       origInfo = fromIntegral origCodeLen :: Double
 
   createDirectoryIfMissing True "data"
   currentTime <- getCurrentTime
   let timestamp = formatTime defaultTimeLocale "%Y%m%d-%H%M%S" currentTime
-      logFilePath = "data/" ++ takeBaseName filename
-                    ++ "-run-" ++ timestamp ++ ".csv"
+      logFilePath = "data/" ++ timestamp ++ "-"
+                    ++ takeBaseName filename ++ ".csv"
   csvHandle <- openFile logFilePath WriteMode
 
-  let strLen = min maxStrLen $ fromInteger srcLen
+  let strLen = min maxStrLen $ fromInteger srcByteLen
   (msh0, asrc0) <- Mesh.fromStream strLen $
                    withPB strLen "Initializing mesh" $
                    S.splitAt maxStrLen $
@@ -55,9 +55,9 @@ main = do
 
       where
       go msh@(Mesh mdl@(Model rs _ _) _ _ _ _ _ _ cdts) src = do
-        sel <- Mesh.extLen msh
+        meshByteLen <- Mesh.extLen msh
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
-            scale = fromIntegral srcLen / fromIntegral sel
+            scale = fromIntegral srcByteLen / fromIntegral meshByteLen
 
         cdtList <- S.toList_ $
           S.mapM (\cdt@(s0s1,(n01,_)) -> do
@@ -81,7 +81,6 @@ main = do
         let approxInfo = rsInfo + nInfo + ksInfo + ssInfo
             approxRatio = approxInfo / origInfo
             approxFactor = recip approxRatio
-
         -- STDOUT
         putStrLn $ here $ "LEN: " ++
           printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
@@ -94,7 +93,6 @@ main = do
           (approxRatio * 100)
           approxFactor
           (100 * recip scale)
-
         -- CSV
         hPutStrLn csvHandle $
           printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
@@ -112,6 +110,7 @@ main = do
         putStrLn ""
         -- </log stats>
 
+        -- [EXIT]
         if minLoss > 0
           then putStrLn (here "Reached minimum. Terminating.")
                >> hClose csvHandle -- end
@@ -119,8 +118,8 @@ main = do
           else Mesh.pushRule msh (s0,s1)
                >>= flip fill src . snd
                >>= uncurry go -- (msh'', src')
-
   -- </main loop>
+
   where
     fill msh src
       | Mesh.full msh = return (msh,src)

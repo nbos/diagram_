@@ -13,7 +13,6 @@ import Data.Tuple.Extra
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import qualified Data.Set as Set
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IS
 import Data.Trie (Trie)
@@ -108,15 +107,15 @@ sortCandidates (Mesh mdl _ _ _ _ _ _ cdts) scale =
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
 pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
-  () <- D.checkIntegrity ss
-  cdtsRef <- findJointsM ss
-  when (cdts /= cdtsRef) $ do
-    let cdtsSet = Set.fromList $ M.toList cdts
-        refSet = Set.fromList $ M.toList cdtsRef
-    liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
-    liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
-    liftIO (putStr "buf: ") >> D.toList buf >>= (liftIO . print)
-    error "before substitution"
+  -- () <- D.checkIntegrity ss
+  -- cdtsRef <- findJointsM ss
+  -- when (cdts /= cdtsRef) $ do
+  --   let cdtsSet = Set.fromList $ M.toList cdts
+  --       refSet = Set.fromList $ M.toList cdtsRef
+  --   liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
+  --   liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
+  --   liftIO (putStr "buf: ") >> D.toList buf >>= (liftIO . print)
+  --   error "before substitution"
 
   (s01, mdl') <- Mdl.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
@@ -137,17 +136,17 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   let cdts' = M.mergeWithKey (const join) id id am $
               M.mergeWithKey (const diff) id id cdts rm
 
-  liftIO $ putStr "am: " >> print am
-  liftIO $ putStr "rm: " >> print rm
+  -- liftIO $ putStr "am: " >> print am
+  -- liftIO $ putStr "rm: " >> print rm
 
-  () <- D.checkIntegrity ss'
-  cdtsRef' <- findJointsM ss'
-  when (cdts' /= cdtsRef') $ do
-    let cdtsSet = Set.fromList $ M.toList cdts'
-        refSet = Set.fromList $ M.toList cdtsRef'
-    liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
-    liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
-    error "after substitution"
+  -- () <- D.checkIntegrity ss'
+  -- cdtsRef' <- findJointsM ss'
+  -- when (cdts' /= cdtsRef') $ do
+  --   let cdtsSet = Set.fromList $ M.toList cdts'
+  --       refSet = Set.fromList $ M.toList cdtsRef'
+  --   liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
+  --   liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
+  --   error "after substitution"
 
   (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
 
