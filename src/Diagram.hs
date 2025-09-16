@@ -34,8 +34,6 @@ main = do
 
   srcHandle <- openFile filename ReadMode
   srcByteLen <- hFileSize srcHandle -- number of atoms in the source
-  let origCodeLen = srcByteLen * 8 -- in bits
-      origInfo = fromIntegral origCodeLen :: Double
 
   createDirectoryIfMissing True "data"
   currentTime <- getCurrentTime
@@ -55,13 +53,11 @@ main = do
 
       where
       go msh@(Mesh mdl@(Model rs _ _) _ _ _ _ _ _ cdts) src = do
-        meshByteLen <- Mesh.extLen msh
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
-            scale = fromIntegral srcByteLen / fromIntegral meshByteLen
 
         cdtList <- S.toList_ $
           S.mapM (\cdt@(s0s1,(n01,_)) -> do
-                     loss <- Mdl.scaledInfoDelta scale mdl s0s1 n01
+                     loss <- Mdl.infoDelta mdl s0s1 n01
                      return (loss,cdt)) $
           withPB (M.size cdts) (here "Computing losses") $
           S.each $ M.toList cdts
@@ -77,27 +73,30 @@ main = do
             return c
 
         -- <log stats>
-        (rsInfo, nInfo, ksInfo, ssInfo) <- Mdl.scaledInformationParts scale mdl
-        let approxInfo = rsInfo + nInfo + ksInfo + ssInfo
-            approxRatio = approxInfo / origInfo
-            approxFactor = recip approxRatio
+        (rsInfo, nInfo, ksInfo, ssInfo) <- Mdl.informationParts mdl
+        meshByteLen <- Mesh.extLen msh
+        let info = rsInfo + nInfo + ksInfo + ssInfo
+            ratio = info / fromIntegral (meshByteLen * 8)
+            factor = recip ratio
+            srcCoverage = fromIntegral meshByteLen
+                          / fromIntegral srcByteLen :: Double
         -- STDOUT
         putStrLn $ here $ "LEN: " ++
           printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
                   ++ "factor: %.4f, over %.2f%% of input")
-          (commaize $ ceiling @_ @Int approxInfo)
+          (commaize $ ceiling @_ @Int info)
           (commaize $ ceiling @_ @Int rsInfo)
           (commaize $ ceiling @_ @Int nInfo)
           (commaize $ ceiling @_ @Int ksInfo)
           (commaize $ ceiling @_ @Int ssInfo)
-          (approxRatio * 100)
-          approxFactor
-          (100 * recip scale)
+          (ratio * 100)
+          factor
+          (100 * srcCoverage)
         -- CSV
         hPutStrLn csvHandle $
           printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
-          (R.numSymbols rs) approxFactor -- %d, %.4f
-          (ceiling @_ @Int approxInfo) -- %d
+          (R.numSymbols rs) factor -- %d, %.4f
+          (ceiling @_ @Int info) -- %d
           (ceiling @_ @Int rsInfo) -- %d
           (ceiling @_ @Int nInfo) -- %d
           (ceiling @_ @Int ksInfo) -- %d

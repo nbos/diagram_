@@ -124,7 +124,14 @@ decode bv
 
 -- | Information in bits of the given model + a sampled symbol string
 information :: PrimMonad m => Model (PrimState m) -> m Double
-information mdl@(Model rs n ks) = (rsInfo + nInfo + ksInfo +) <$> ssInfo
+information mdl = do
+  (rsInfo, nInfo, ksInfo, ssInfo) <- informationParts mdl
+  return $ rsInfo + nInfo + ksInfo + ssInfo
+
+informationParts :: PrimMonad m => Model (PrimState m) ->
+                                   m (Double, Double, Double, Double)
+informationParts mdl@(Model rs n ks) =
+  (rsInfo, nInfo, ksInfo, ) <$> ssInfo
   where
     rsInfo = R.information rs
     nInfo = eliasInfo n
