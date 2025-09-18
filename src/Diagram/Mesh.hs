@@ -92,17 +92,6 @@ fromStream n str = do
     trie = Trie.fromList $ (,()) . BS.pack . (:[]) <$> [0..255]
     sls = U.replicate 256 1
 
--- | Compute the loss for each candidate joint and return joints ordered
--- by loss, lowest first, with count.
--- TODO: bookkeep
-sortCandidates :: PrimMonad m => Mesh (PrimState m) -> Double ->
-                                 m [(Double,((Sym,Sym),(Int,IntSet)))]
-sortCandidates (Mesh mdl _ _ _ _ _ _ cdts) scale =
-  L.sort <$> mapM withLoss (M.toList cdts)
-  where withLoss cdt@(s0s1,(n01,_)) = do
-          loss <- Mdl.scaledInfoDelta scale mdl s0s1 n01
-          return (loss,cdt)
-
 -- | Add a rule, rewrite, with progress bars
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
@@ -116,7 +105,6 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   --   liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
   --   liftIO (putStr "buf: ") >> D.toList buf >>= (liftIO . print)
   --   error "before substitution"
-
   (s01, mdl') <- Mdl.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
@@ -135,10 +123,8 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
 
   let cdts' = M.mergeWithKey (const join) id id am $
               M.mergeWithKey (const diff) id id cdts rm
-
   -- liftIO $ putStr "am: " >> print am
   -- liftIO $ putStr "rm: " >> print rm
-
   -- () <- D.checkIntegrity ss'
   -- cdtsRef' <- findJointsM ss'
   -- when (cdts' /= cdtsRef') $ do
@@ -147,9 +133,7 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   --   liftIO $ putStr "should be: " >> print (refSet Set.\\ cdtsSet)
   --   liftIO $ putStr "not:       " >> print (cdtsSet Set.\\ refSet)
   --   error "after substitution"
-
   (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
-
   where
     err = error $ "not a candidate: " ++ show (s0,s1)
     join (a,s) (b,t) = nothingIf ((== 0) . fst) (a + b, IS.union s t)
@@ -160,7 +144,6 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
     sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
 
 type Boxed = B.MVector
-
 -- | Given a construction rule `(s0,s1) ==> s01`, a list and a stream of
 -- the indices of the construction sites, compute the changes
 -- (added,subtracted) to apply to candidates\/joints counts\/locations
