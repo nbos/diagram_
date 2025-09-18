@@ -116,6 +116,10 @@ decode bv
       return $ Just (mdl, ss, bv'''')
   | otherwise = return Nothing
 
+--------------------------
+-- INFORMATION MEASURES --
+--------------------------
+
 -- I --
 
 -- | Information in bits of the given model + a sampled symbol string
@@ -136,10 +140,122 @@ informationParts mdl@(Model rs n ks) =
 
 -- ΔI
 
--- | Compute the change in code length (bits) of the model + symbol
--- string matching it given a new rule introduction
+-- For an alphabet of size `m`, a string of length `n`, a joint (s0,s1)
+-- with count `k01` in the string, and counts `k0` of symbol `s0` and
+-- `k1` of symbol `s1`, the difference in bits of the length of the
+-- serialization using our encoding scheme (rules, string len,
+-- histogram, permutation) can be computed efficiently as the sum of the
+-- differences in code length of the four (4) different fields,
+-- according to their serialization method.
+--
+-- The exapansion of the four terms is as follows:
+--
+-- [Rules]
+-- len(Elias(m-256)) - len(Elias(m-255)) + 2 * log(m)
+--
+-- [String length]
+-- len(Elias(n-k01)) - len(Elias(n))
+--
+-- [Histogram]
+-- log((n-k01+m-1)!) - log((n-k01)!) - log((m-1)!)
+-- - log((n+m-1)!) + log(n!) + log((m-1)!)
+--
+-- [Permutation]
+-- log((n-k01)!) - log(n!) + log(k0!) - log(k01!)
+-- if s0 == s1 then - log((k0-2*k01)!)
+-- else - log((k0-k01)!) - log((k1-k01)!) + log(k1!)
+--
+-- A number of terms in the histogram's and permutation's cancel out
+-- which makes them equal to:
+--
+-- [Histogram]
+-- log((n-k01+m-1)!) - log((n+m-1)!)
+--
+-- [Permutation]
+-- log(k0!) - log(k01!)
+-- if s0 == s1 then - log((k0-2*k01)!)
+-- else - log((k0-k01)!) - log((k1-k01)!) + log(k1!)
+
+-- | Given the number of symbols `m` (length of the counts vector), the
+-- length of the string `n` (sum of counts), the count of a symbol to be
+-- introduced `k01` (a joint count) where the left and right parts are
+-- two (2) different symbols (so s0 /= s1) and the count of the left
+-- `k0` and right `k1` part of the introduced joint, return the
+-- difference in code length, in bits, of the serialization.
+infoLoss2 :: Int -> Int -> Int -> Int -> Int -> Double
+infoLoss2 m n k01 k0 k1 = rLoss m
+                          + fromIntegral (nLoss n k01)
+                          + kLoss m n k01
+                          + sLoss2 k01 k0 k1
+
+-- | Given the number of symbols `m` (length of the counts vector), the
+-- length of the string `n` (sum of counts), the count of a symbol to be
+-- introduced `k00` (a joint count) where the left and right parts are
+-- the same (1) symbol (so s0 == s1) and the count of the part symbol
+-- `k0` before the introduction of the joint symbol, return the
+-- difference in code length, in bits, of the serialization.
+infoLoss1 :: Int -> Int -> Int -> Int -> Double
+infoLoss1 m n k00 k0 = rLoss m
+                       + fromIntegral (nLoss n k00)
+                       + kLoss m n k00
+                       + sLoss1 k00 k0
+
+-- | Given the number of symbols `m` in a rule set, return the
+-- difference in code length of its serialization.
+rLoss :: Int -> Double
+rLoss = R.infoDelta'
+
+-- | Given the length of the string `n` and the count of an introduced
+-- symbol, return the difference in length of the Elias encoding of the
+-- length after the introduction of the symbol definition. Always
+-- positive.
+nLoss :: Int -> Int -> Int
+nLoss n k01 = eliasCodeLen n' - eliasCodeLen n
+  where n' = n - k01
+
+-- | Given the number of symbols `m` (length of the counts vector), the
+-- length of the string `n` (sum of counts), the count of a symbol to be
+-- introduced `k` (a joint count), return the first variable term of the
+-- reduced loss expression. Always negative.
+kLoss :: Int -> Int -> Int -> Double
+kLoss m n = \k -> iLogFactorial (x - k) - iLogFactorial x
+  where x = m - 1 + n
+
+-- | Given a joint countwhere the left and right parts are two (2)
+-- different symbols (so s0 /= s1) and the count of the left `k0` and
+-- right `k1` part of the introduced joint, return the second variable
+-- term of the reduced loss expression. Always positive.
+sLoss2 :: Int -> Int -> Int -> Double
+sLoss2 k01 k0 k1 = iLogFactorial k0 + iLogFactorial k1
+                   - iLogFactorial k0' - iLogFactorial k1'
+                   - iLogFactorial k01
+  where k0' = k0 - k01
+        k1' = k1 - k01
+
+-- | Given a joint countwhere the left and right parts are two (2)
+-- different symbols (so s0 /= s1) and the count of the left `k0` and
+-- right `k1` part of the introduced joint, return the second variable
+-- term of the reduced loss expression.
+sLoss1 :: Int -> Int -> Double
+sLoss1 k00 k0 = iLogFactorial k0 - iLogFactorial k0' - iLogFactorial k00
+  where k0' = k0 - 2*k00
+
+-- | Given two symbols, compute the difference in code length of the
+-- serialization were a rule introduced for their joint symbol.
 infoDelta :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int -> m Double
-infoDelta (Model rs n ks) (s0,s1) k01 = do
+infoDelta (Model rs n ks) (s0,s1) k01
+  | s0 == s1 = infoLoss1 m n k01 <$> mk0
+  | otherwise = liftA2 (infoLoss2 m n k01) mk0 mk1
+  where
+    m = R.numSymbols rs
+    mk0 = MV.read ks s0
+    mk1 = MV.read ks s1
+
+-- | Compute the change in code length (bits) of the model + symbol
+-- string matching it given a new rule introduction. Not optimized: use
+-- infoDelta instead for an exact value or infoLoss1-2.
+naiveInfoDelta :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int -> m Double
+naiveInfoDelta (Model rs n ks) (s0,s1) k01 = do
   k0 <- MV.read ks s0
   k1 <- MV.read ks s1
   -- ss a multiset permutation of counts ks:

@@ -57,7 +57,7 @@ main = do
 
         cdtList <- S.toList_ $
           S.mapM (\cdt@(s0s1,(n01,_)) -> do
-                     loss <- Mdl.infoDelta mdl s0s1 n01
+                     loss <- Mdl.naiveInfoDelta mdl s0s1 n01
                      return (loss,cdt)) $
           withPB (M.size cdts) (here "Computing losses") $
           S.each $ M.toList cdts

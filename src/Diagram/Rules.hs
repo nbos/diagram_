@@ -317,11 +317,12 @@ information rs = lenCodeInfo + rulesCodeInfo
 -- now. @fwdDeltaInfo rs@ approximately computes @information (snd $
 -- push (s0,s1) rs) - information rs@
 infoDelta :: Rules -> Double
-infoDelta rs = lenDeltaInfo + rulesDeltaInfo
-  where
-    len = V.length rs
-    lenDeltaInfo = eliasInfo (len + 1) - eliasInfo len
-    rulesDeltaInfo = log2e * 2 * log (fromIntegral (256 + len))
+infoDelta = infoDelta' . V.length
+
+infoDelta' :: Int -> Double
+infoDelta' len = fromIntegral lenDeltaInfo + rulesDeltaInfo
+  where lenDeltaInfo = eliasCodeLen (len + 1) - eliasCodeLen len
+        rulesDeltaInfo = log2e * 2 * log (fromIntegral (256 + len))
 
 -- -- | The exact length of the code (in bits) of the serialization of the
 -- -- rule set (exact but not very efficient)
