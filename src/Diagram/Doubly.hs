@@ -24,8 +24,8 @@ data Doubly v s a = Doubly
   !(U.MVector s Index) -- ^ previous indexes
   !(U.MVector s Index) -- ^ next indexes
 
-checkIntegrity :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m ()
-checkIntegrity l@(Doubly _ free elems _ _) = do
+checkIntegrity :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> r -> m r
+checkIntegrity l@(Doubly _ free elems _ _) r = do
   fwd <- S.toList_ $ streamKeys l
   bwd <- S.toList_ $ revStreamKeys l
   when (reverse bwd /= fwd) $ err $ "BWD keys is not the reverse of FWD keys:\n"
@@ -47,10 +47,9 @@ checkIntegrity l@(Doubly _ free elems _ _) = do
 
   -- verify value initialization
   as <- S.toList_ $ stream l
-  return $ foldr ((.) . seq) id as ()
+  return $ foldr ((.) . seq) id as r
 
-  where
-    err = error . (++) "Doubly.checkIntegrity: "
+  where err = error . (++) "Doubly.checkIntegrity: "
 
 -- | Allocate a new list of the given size with undefined values
 new :: (PrimMonad m, MVector v a) => Int -> m (Doubly v (PrimState m) a)

@@ -62,6 +62,7 @@ executable diagram
                       Diagram.Mesh
                       Diagram.Rules
                       Diagram.Model
+                      Diagram.Joints
                       Diagram.Doubly
                       Diagram.Dynamic
                       Diagram.Progress
