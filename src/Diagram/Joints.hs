@@ -5,7 +5,6 @@ module Diagram.Joints (module Diagram.Joints) where
 import Control.Monad
 import Control.Monad.Primitive (PrimMonad(PrimState))
 
-import Data.Tuple.Extra
 import qualified Data.List as L
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -31,14 +30,14 @@ type Doubly s = D.Doubly MVector s Sym
 type Joints = Map (Sym,Sym) (Int, IntSet)
 -- TODO: (IntMap (Double, Map Double (Sym, Sym, IntSet)))
 
--- | Construction
-findJointsM :: PrimMonad m => Doubly (PrimState m) -> m Joints
-findJointsM = fmap fst
-              . findJointsM_ M.empty
+-- | Construction using the indices of the doubly-linked list
+fromList :: PrimMonad m => Doubly (PrimState m) -> m Joints
+fromList = fmap fst
+              . fromList_ M.empty
               . D.streamWithKey
 
-findJointsM_ :: Monad m => Joints -> Stream (Of (Index,Sym)) m r -> m (Joints, r)
-findJointsM_ m0 iss0 = (S.next iss0 >>=) $ \case
+fromList_ :: Monad m => Joints -> Stream (Of (Index,Sym)) m r -> m (Joints, r)
+fromList_ m0 iss0 = (S.next iss0 >>=) $ \case
   Left r -> return (m0, r)
   Right ((i0,s0),iss0') -> go i0 s0 m0 iss0'
   where
@@ -47,10 +46,23 @@ findJointsM_ m0 iss0 = (S.next iss0 >>=) $ \case
       Right ((i1,s1),ss') -> (S.next ss' >>=) $ \case
         Left r -> return (m', r) -- last joint
         Right (is2@(_,s2),ss'') -> f m' $ S.yield is2 >> ss''
-          where f | s0 == s1 && s1 == s2 = findJointsM_ -- even
+          where f | s0 == s1 && s1 == s2 = fromList_ -- even
                   | otherwise            = go i1 s1     -- odd
-        where m' = M.insertWith (const $ (+1) *** IS.insert i0)
-                   (s0,s1) (1, IS.singleton i0) m
+        where m' = insert m (s0,s1) i0
+
+insert :: Joints -> (Sym,Sym) -> Index -> Joints
+insert jts s0s1 i = M.insertWith f s0s1 (1, IS.singleton i) jts
+  where f _ (n,is) = (n + 1, IS.insert i is)
+
+-- | The union of two sets of counts + indices
+union :: Joints -> Joints -> Joints
+union = M.mergeWithKey (const f) id id
+  where f (a,s) (b,t) = nothingIf ((== 0) . fst) (a + b, IS.union s t)
+
+-- | Subtrack the counts + indices in the second map from the first map
+difference :: Joints -> Joints -> Joints
+difference = M.mergeWithKey (const f) id id
+  where f (a,s) (b,t) = nothingIf ((== 0) . fst) (a - b, IS.difference s t)
 
 type Boxed = B.MVector
 -- | Given a construction rule `(s0,s1) ==> s01`, a list and a stream of
@@ -59,11 +71,11 @@ type Boxed = B.MVector
 -- were the constructions to take place assuming that the construction
 -- substitutes the left (s0) part of the joint and the right part (s1)
 -- gets freed.
-constr :: forall m r. PrimMonad m => (Sym,Sym) -> Sym ->
-          Doubly (PrimState m) -> Stream (Of Index) m r -> m ((Joints, Joints), r)
-constr _ _ (D.Doubly Nothing _ _ _ _) is0 = ((M.empty, M.empty), ) <$> S.effects is0
-constr (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
-  s0s1ref <- newPrimRef      @Boxed     IS.empty -- (s0,s1) (-) (redundant)
+delta :: forall m r. PrimMonad m => (Sym,Sym) -> Sym ->
+         Doubly (PrimState m) -> Stream (Of Index) m r -> m ((Joints, Joints), r)
+delta _ _ (D.Doubly Nothing _ _ _ _) is0 = ((M.empty, M.empty), ) <$> S.effects is0
+delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
+  s0s1ref <- newPrimRef      @Boxed     IS.empty -- (s0,s1) (-) (redundant (n01))
   s1s0ref <- newPrimRef      @Boxed     IS.empty -- (s1,s0) (-)
   prevvec <- MV.replicate @_ @Boxed s01 IS.empty -- (i,s01) (-/+)
   nextvec <- MV.replicate @_ @Boxed s01 IS.empty -- (s1,i)  (-)
@@ -186,7 +198,7 @@ constr (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
 -- given joints map. Throws an error if they differ.
 validate :: PrimMonad m => Joints -> Doubly (PrimState m) -> a -> m a
 validate cdts ss a = do
-  cdtsRef <- findJointsM ss
+  cdtsRef <- fromList ss
   when (cdts /= cdtsRef) $
     let cdtsSet = Set.fromList $ M.toList cdts
         refSet = Set.fromList $ M.toList cdtsRef
@@ -290,18 +302,19 @@ naiveRecountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
   -- </loop>
 
   resref <- newPrimRef @B.MVector M.empty
-  let insert k n = when (n /= 0) $ modifyPrimRef resref $ M.insertWith (+) k n
-
+  let rinsert k n = when (n /= 0) $
+                    modifyPrimRef resref $
+                    M.insertWith (+) k n
   -- read --
-  insert (s0,s1) . (0-) =<< readPrimRef s0s1ref -- (-)
-  insert (s1,s0) . (0-) =<< readPrimRef s1s0ref -- (-)
-  MV.iforM_ prevvec $ \prev n -> insert (prev,s0) (-n)  -- (-)
-                                 >> insert (prev,s01) n -- (+)
-  MV.iforM_ nextvec $ \next n -> insert (s1,next) (-n)  -- (-)
-                                 >> insert (s01,next) n -- (+)
-  insert (s0,s0) =<< readPrimRef s0s0ref   -- (+)
-  insert (s1,s1) =<< readPrimRef s1s1ref   -- (+)
-  insert (s01,s01) =<< readPrimRef autoref -- (+)
+  rinsert (s0,s1) . (0-) =<< readPrimRef s0s1ref -- (-)
+  rinsert (s1,s0) . (0-) =<< readPrimRef s1s0ref -- (-)
+  MV.iforM_ prevvec $ \prev n -> rinsert (prev,s0) (-n)  -- (-)
+                                 >> rinsert (prev,s01) n -- (+)
+  MV.iforM_ nextvec $ \next n -> rinsert (s1,next) (-n)  -- (-)
+                                 >> rinsert (s01,next) n -- (+)
+  rinsert (s0,s0) =<< readPrimRef s0s0ref   -- (+)
+  rinsert (s1,s1) =<< readPrimRef s1s1ref   -- (+)
+  rinsert (s01,s01) =<< readPrimRef autoref -- (+)
 
   -- end --
   (,r) <$> readPrimRef resref

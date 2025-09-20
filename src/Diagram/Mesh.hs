@@ -29,9 +29,9 @@ import qualified Diagram.Rules as R
 import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
 import Diagram.Model (Model(..))
-import qualified Diagram.Model as Mdl
+import qualified Diagram.Model as Model
 import Diagram.Joints (Joints,Doubly)
-import qualified Diagram.Joints as J
+import qualified Diagram.Joints as Joints
 import Diagram.Progress
 import Diagram.Util
 
@@ -70,8 +70,9 @@ fromStream :: PrimMonad m => Int -> Stream (Of Word8) m r ->
                              m (Mesh (PrimState m), r)
 fromStream n str = do
   (ss,(mdl,(cdts,r))) <- D.fromStream n $
-                         Mdl.fromStream R.empty $ S.copy $
-                         J.findJointsM_ M.empty $ S.zip (S.enumFrom 0) $ S.copy $
+                         Model.fromStream R.empty $ S.copy $
+                         Joints.fromList_ M.empty $
+                         S.zip (S.enumFrom 0) $ S.copy $
                          S.map fromEnum str
 
   -- check parity of end of `ss`
@@ -92,13 +93,14 @@ fromStream n str = do
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Sym, Mesh (PrimState m))
 pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
-  (s01, mdl') <- Mdl.pushRule mdl (s0,s1) n01
+  (s01, mdl') <- Model.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
 
-  ((am,rm),_) <- J.constr (s0,s1) s01 ss $
+  ((am,rm),_) <- Joints.delta (s0,s1) s01 ss $
                  withPB n01 (here "Computing change on candidates") $
                  S.each i01s
+  let cdts' = (cdts `Joints.difference` rm) `Joints.union` am
 
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
          withPB n01 (here "Modifying string in place") $
@@ -108,13 +110,10 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
 
-  let cdts' = M.mergeWithKey (const join) id id am $
-              M.mergeWithKey (const diff) id id cdts rm
   (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
+
   where
     err = error $ "not a candidate: " ++ show (s0,s1)
-    join (a,s) (b,t) = nothingIf ((== 0) . fst) (a + b, IS.union s t)
-    diff (a,s) (b,t) = nothingIf ((== 0) . fst) (a - b, IS.difference s t)
     (n01, i01s) = second IS.toList . fromMaybe err $ M.lookup (s0,s1) cdts
     bs01 = R.bytestring rs s0 <> R.bytestring rs s1
     trie' = Trie.insert bs01 () trie
@@ -148,15 +147,14 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
       | otherwise = do -- assert $ not (D.null buf || D.null ss)
           let i0buf = fromJust $ D.head buf
           s <- D.read buf i0buf
-          mdl' <- Mdl.incCount mdl s
+          mdl' <- Model.incCount mdl s
           (i_n', ss') <- fromJust <$> D.trySnoc ss s
           buf' <- D.delete buf i0buf
           let len = R.symbolLength rs s
               bs' = BS.drop len bs
               par' = s /= sn || not par -- if s == sn then not par else True
               cdts' | s == sn && not par = cdts
-                    | otherwise = M.insertWith (const $ (+1) *** IS.insert i_n)
-                                  (sn,s) (1, IS.singleton i_n) cdts
+                    | otherwise = Joints.insert cdts (sn,s) i_n
           go mdl' ss' par' buf' cdts' i_n' s bs'
       where
         exts = Trie.keys $ Trie.submap bs trie
