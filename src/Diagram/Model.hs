@@ -17,7 +17,7 @@ import qualified Codec.Elias as Elias
 import qualified Codec.Arithmetic.Combinatorics as Comb
 import Codec.Arithmetic.Variety.BitVec (BitVec)
 
-import Diagram.Rules (Rules)
+import Diagram.Rules (Rules,Sym)
 import qualified Diagram.Rules as R
 import Diagram.Information
 
@@ -38,17 +38,17 @@ data Model s = Model {
 empty :: PrimMonad m => m (Model (PrimState m))
 empty = Model R.empty 0 <$> U.unsafeThaw (U.replicate 256 0)
 
-incCounts :: PrimMonad m => Model (PrimState m) -> [Int] ->
+incCounts :: PrimMonad m => Model (PrimState m) -> [Sym] ->
                             m (Model (PrimState m))
 incCounts = foldM incCount
 
-incCount :: PrimMonad m => Model (PrimState m) -> Int ->
+incCount :: PrimMonad m => Model (PrimState m) -> Sym ->
                            m (Model (PrimState m))
 incCount (Model rs n ks) s =
   MV.modify ks (+1) s >> return (Model rs (n+1) ks)
 
 -- | Reconstruction from rule set and fully constructed symbol string
-fromList :: PrimMonad m => Rules -> [Int] -> m (Model (PrimState m))
+fromList :: PrimMonad m => Rules -> [Sym] -> m (Model (PrimState m))
 fromList rs ss = do
   ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
   forM_ ss $ MV.modify ks (+1)
@@ -56,7 +56,7 @@ fromList rs ss = do
   return $ Model rs n ks
 
 -- | Reconstruction from rule set and fully constructed symbol stream
-fromStream :: PrimMonad m => Rules -> Stream (Of Int) m r ->
+fromStream :: PrimMonad m => Rules -> Stream (Of Sym) m r ->
                              m (Model (PrimState m), r)
 fromStream rs ss = do
   ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
@@ -67,8 +67,8 @@ fromStream rs ss = do
 clone :: PrimMonad m => Model (PrimState m) -> m (Model (PrimState m))
 clone (Model rs n ks) = Model rs n <$> MV.clone ks
 
-pushRule :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int ->
-                           m (Int, Model (PrimState m))
+pushRule :: PrimMonad m => Model (PrimState m) -> (Sym,Sym) -> Int ->
+                           m (Sym, Model (PrimState m))
 pushRule (Model rs n ks) (s0,s1) n01 = do
   ks' <- MV.grow ks 1  -- O(n) snoc
   MV.write ks' s01 n01 --
@@ -84,14 +84,14 @@ pushRule (Model rs n ks) (s0,s1) n01 = do
 
 -- | Serialize a symbol string given a rule set through the
 -- serialization of the model of the string and a permutation
-encode :: Rules -> [Int] -> BitVec
+encode :: Rules -> [Sym] -> BitVec
 encode rs ss = rsCode <> nCode <> ksCode <> ssCode
   where (rsCode, nCode, ksCode, ssCode) = encodeParts rs ss
 
 -- | Serialize the four (4) components of a modeled string
 -- serialization. In order: rules, total symbols count, individual
 -- symbol counts, and the string as a permutation
-encodeParts :: Rules -> [Int] -> (BitVec, BitVec, BitVec, BitVec)
+encodeParts :: Rules -> [Sym] -> (BitVec, BitVec, BitVec, BitVec)
 encodeParts rs ss = (rsCode, nCode, ksCode, ssCode)
   where
     rsCode = R.encode rs
@@ -106,7 +106,7 @@ encodeParts rs ss = (rsCode, nCode, ksCode, ssCode)
 
 -- | Deserialize a model+symbol string at the head of a given bit vector
 -- that was serialized using @encode@
-decode :: PrimMonad m => BitVec -> m (Maybe (Model (PrimState m), [Int], BitVec))
+decode :: PrimMonad m => BitVec -> m (Maybe (Model (PrimState m), [Sym], BitVec))
 decode bv
   | Just (rs, bv') <- R.decode bv
   , Just (n , bv'') <- first fromInteger <$> Elias.decodeDelta bv'
@@ -242,7 +242,7 @@ sLoss1 k00 k0 = iLogFactorial k0 - iLogFactorial k0' - iLogFactorial k00
 
 -- | Given two symbols, compute the difference in code length of the
 -- serialization were a rule introduced for their joint symbol.
-infoDelta :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int -> m Double
+infoDelta :: PrimMonad m => Model (PrimState m) -> (Sym,Sym) -> Int -> m Double
 infoDelta (Model rs n ks) (s0,s1) k01
   | s0 == s1 = infoLoss1 m n k01 <$> mk0
   | otherwise = liftA2 (infoLoss2 m n k01) mk0 mk1
@@ -254,7 +254,7 @@ infoDelta (Model rs n ks) (s0,s1) k01
 -- | Compute the change in code length (bits) of the model + symbol
 -- string matching it given a new rule introduction. Not optimized: use
 -- infoDelta instead for an exact value or infoLoss1-2.
-naiveInfoDelta :: PrimMonad m => Model (PrimState m) -> (Int,Int) -> Int -> m Double
+naiveInfoDelta :: PrimMonad m => Model (PrimState m) -> (Sym,Sym) -> Int -> m Double
 naiveInfoDelta (Model rs n ks) (s0,s1) k01 = do
   k0 <- MV.read ks s0
   k1 <- MV.read ks s1
@@ -309,7 +309,7 @@ stringInfo (Model _ n ks)
 -- ΔI(ss)
 
 stringInfoDeltaWith :: Num a => (a -> Double) ->
-                       a -> ((Int,a),(Int,a)) -> a -> Double
+                       a -> ((Sym,a),(Sym,a)) -> a -> Double
 stringInfoDeltaWith logFact n ((s0,k0),(s1,k1)) k01
   | s0 == s1 = log2e * ( logFact n' - logFact n
                          - logFact (k0 - 2*k01) + logFact k0
@@ -321,11 +321,11 @@ stringInfoDeltaWith logFact n ((s0,k0),(s1,k1)) k01
   where n' = n - k01
 {-# INLINE stringInfoDeltaWith #-}
 
-stringInfoDelta :: Int -> ((Int,Int),(Int,Int)) -> Int -> Double
+stringInfoDelta :: Int -> ((Sym,Int),(Sym,Int)) -> Int -> Double
 stringInfoDelta = stringInfoDeltaWith iLogFactorial
 {-# INLINE stringInfoDelta #-}
 
-fStringInfoDelta :: Double -> ((Int,Double),(Int,Double)) -> Double -> Double
+fStringInfoDelta :: Double -> ((Sym,Double),(Sym,Double)) -> Double -> Double
 fStringInfoDelta = stringInfoDeltaWith logFactorial
 {-# INLINE fStringInfoDelta #-}
 

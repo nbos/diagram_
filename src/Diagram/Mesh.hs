@@ -28,15 +28,15 @@ import Streaming hiding (second,join)
 import qualified Streaming.Prelude as S
 import Diagram.Streaming () -- PrimMonad instance
 
+import Diagram.Rules (Sym)
+import qualified Diagram.Rules as R
 import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
-import qualified Diagram.Rules as R
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Mdl
 import Diagram.Progress
 import Diagram.Util
 
-type Sym = Int -- symbol
 type Doubly s = D.Doubly MVector s Sym
 
 ----------
@@ -94,7 +94,7 @@ fromStream n str = do
 
 -- | Add a rule, rewrite, with progress bars
 pushRule :: (PrimMonad m, MonadIO m) =>
-            Mesh (PrimState m) -> (Sym,Sym) -> m (Int, Mesh (PrimState m))
+            Mesh (PrimState m) -> (Sym,Sym) -> m (Sym, Mesh (PrimState m))
 pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   -- () <- D.checkIntegrity ss
   -- cdtsRef <- findJointsM ss

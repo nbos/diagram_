@@ -37,9 +37,11 @@ import qualified Codec.Arithmetic.Variety.BitVec as BV
 import Diagram.Util
 import Diagram.Information
 
+type Sym = Int -- symbol
+
 -- | Self-referrential vector of recipes for the construction of all
 -- symbols above 256 indexed at s-256
-type Rules = U.Vector (Int,Int)
+type Rules = U.Vector (Sym,Sym)
 
 -- | New empty rule set
 empty :: Rules
@@ -54,7 +56,7 @@ numSymbols :: Rules -> Int
 numSymbols = (256 +) . size
 
 -- | O(len). Compute the length of a symbol
-symbolLength :: Rules -> Int -> Int
+symbolLength :: Rules -> Sym -> Int
 symbolLength rs = go
   where
     go s | s < 256   = 1
@@ -73,49 +75,49 @@ symbolLengths rs = runST $ do
     MV.write mv s (len0 + len1)
   U.freeze mv
 
-fromList :: [(Int, Int)] -> Rules
+fromList :: [(Sym,Sym)] -> Rules
 fromList = V.fromList
 
 -- | Add a new symbol with a construction rule. Returns updated rules
 -- and index of new symbol. O(n)
-pushRule :: (Int, Int) -> Rules -> (Int, Rules)
+pushRule :: (Sym,Sym) -> Rules -> (Sym, Rules)
 pushRule s0s1 rs =
   assert (uncurry (&&) $ both (< s01) s0s1)
   (s01, V.snoc rs s0s1)
   where s01 = numSymbols rs
 
 -- | Lookup the rule for constructing a given symbol
-(!) :: Rules -> Int -> (Int,Int)
+(!) :: Rules -> Sym -> (Sym,Sym)
 (!) rs s = rs V.! (s - 256)
 infixl 9 !
 
 -- | Lookup the rule for constructing a given symbol. Nothing returned
 -- if the given symbol is atomic (<256) or not yet defined
-(!?) :: Rules -> Int -> Maybe (Int,Int)
+(!?) :: Rules -> Sym -> Maybe (Sym,Sym)
 (!?) = invLookup
 infixl 9 !?
 
 -- | Lookup the rule for constructing a given symbol. Nothing returned
 -- if the given symbol is atomic (<256) or not yet defined
-invLookup :: Rules -> Int -> Maybe (Int,Int)
+invLookup :: Rules -> Sym -> Maybe (Sym,Sym)
 invLookup rs s | s < 256   = Nothing
                | otherwise = Just $ rs ! s
 
 -- | Deconstruct a symbol back into a list of bytes
-extension :: Rules -> Int -> [Word8]
+extension :: Rules -> Sym -> [Word8]
 extension rs = go
   where
     go s | s < 256 = [toEnum s]
          | otherwise = let (s0,s1) = rs V.! (s - 256)
                        in go s0 ++ go s1
 
-bytestring :: Rules -> Int -> ByteString
+bytestring :: Rules -> Sym -> ByteString
 bytestring = BS.pack .: extension
 
 -- | List the symbols that are constructive prefixes of the given
 -- symbol, from large to small, starting with the symbol itself and
 -- ending with the first atomic symbol of its extension
-prefixes :: Rules -> Int -> [Int]
+prefixes :: Rules -> Sym -> [Sym]
 prefixes rs = go
   where
     go s | s < 256 = [s]
@@ -125,7 +127,7 @@ prefixes rs = go
 -- | List the symbols that are constructive suffixes of the given
 -- symbol, from large to small, starting with the symbol itself and
 -- ending with the last atomic symbol of its extension
-suffixes :: Rules -> Int -> [Int]
+suffixes :: Rules -> Sym -> [Sym]
 suffixes rs = go
   where
     go s | s < 256 = [s]
@@ -137,7 +139,7 @@ suffixes rs = go
 -- member of the suffixes of the first as specified by the `suffixes`
 -- function. The extension of the subtracted symbol prepended by the
 -- returned string is equal to the extension of the first given symbol.
-lRecip :: Rules -> Int -> Int -> [Int]
+lRecip :: Rules -> Sym -> Sym -> [Sym]
 lRecip rs s01 s1 = go s01
   where
     go s | s == s1 = []
@@ -151,7 +153,7 @@ lRecip rs s01 s1 = go s01
 -- functions. The extension of the returned string prepended by the
 -- subtracted symbol is equal to the extension of the first given
 -- symbol.
-rRecip :: Rules -> Int -> Int -> [Int]
+rRecip :: Rules -> Sym -> Sym -> [Sym]
 rRecip rs s01 s0 = go [] s01
   where
     go acc s | s == s0 = acc
@@ -160,13 +162,13 @@ rRecip rs s01 s0 = go [] s01
                            ++ show (s01, s0, prefixes rs s01)
 
 -- | Resolve the symbol back into a string of chars
-toString :: Rules -> [Int] -> String
+toString :: Rules -> [Sym] -> String
 toString = UTF8.toString
            . BS.pack
            .: concatMap
            . extension
 
-toEscapedString :: Rules -> [Int] -> String
+toEscapedString :: Rules -> [Sym] -> String
 toEscapedString = concatMap escapeChar .: toString
   where
     escapeChar '\n' = "\\n"    -- Replace newline with \n
@@ -178,19 +180,19 @@ toEscapedString = concatMap escapeChar .: toString
     escapeChar ',' = "\\,"     -- for CSV
     escapeChar c    = [c]      -- Leave other characters unchanged
 
-type FwdRules = Map (Int,Int) Int -- (s0,s1) -> s01
+type FwdRules = Map (Sym,Sym) Sym -- (s0,s1) -> s01
 
-subst :: Rules -> [Int] -> [Int]
+subst :: Rules -> [Sym] -> [Sym]
 subst rs = subst_ rs rsm []
   where rsm = toMap rs
 
 -- | Given a rule set (forward) and a reversed list of previous symbols
 -- (closest first) and a forward list of following symbols, return the
 -- full list in forward order with all possible constructions made
-subst_ :: Rules -> FwdRules -> [Int] -> [Int] -> [Int]
+subst_ :: Rules -> FwdRules -> [Sym] -> [Sym] -> [Sym]
 subst_ rs rsm = reverse .: L.foldl' (revReduce rs rsm)
 
-revReduce :: Rules -> FwdRules -> [Int] -> Int -> [Int]
+revReduce :: Rules -> FwdRules -> [Sym] -> Sym -> [Sym]
 revReduce rs rsm = go
   where
     go [] s1 = [s1]
@@ -215,9 +217,8 @@ revReduce rs rsm = go
 -- a stream equal in extension to the remainder but with its head
 -- possibly partially constructed. Makes it possible to iteratively
 -- consume a stream in chunks of given sizes.
-splitAtSubst :: Monad m => Rules -> FwdRules -> Trie () ->
-                Int -> Stream (Of Int) m r ->
-                Stream (Of Int) m (Stream (Of Int) m r)
+splitAtSubst :: Monad m => Rules -> FwdRules -> Trie () -> Int ->
+                Stream (Of Sym) m r -> Stream (Of Sym) m (Stream (Of Sym) m r)
 splitAtSubst rs rsm trie = go []
   where
     yieldUntilPrefixing fwd
@@ -251,7 +252,7 @@ splitAtSubst rs rsm trie = go []
 toMap :: Rules -> FwdRules
 toMap = M.fromList . flip zip [256..] . V.toList
 
-asGen :: ((Int,Int) -> Int) -> Rules -> B.Vector [Int]
+asGen :: ((Sym,Sym) -> Sym) -> Rules -> B.Vector [Sym]
 asGen f rs = V.create $ do
   mv <- MV.replicate (numSymbols rs) []
   forM_ [256..numSymbols rs - 1] $ \s ->
@@ -261,12 +262,12 @@ asGen f rs = V.create $ do
 
 -- | For every symbol, the list of composite symbols that have that
 -- symbol as first/left part.
-asFsts :: Rules -> B.Vector [Int]
+asFsts :: Rules -> B.Vector [Sym]
 asFsts = asGen fst
 
 -- | For every symbol, the list of composite symbols that have that
 -- symbol as second/right part.
-asSnds :: Rules -> B.Vector [Int]
+asSnds :: Rules -> B.Vector [Sym]
 asSnds = asGen snd
 
 -------------------
