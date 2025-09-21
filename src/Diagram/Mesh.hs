@@ -100,7 +100,7 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   ((am,rm),_) <- Joints.delta (s0,s1) s01 ss $
                  withPB n01 (here "Computing change on candidates") $
                  S.each i01s
-  let cdts' = (cdts `Joints.difference'` rm) `Joints.union'` am
+  let cdts' = (cdts `Joints.difference` rm) `Joints.union` am
 
   ss' <- S.foldM_ (subst1 s01) (return ss) return $
          withPB n01 (here "Modifying string in place") $
@@ -154,7 +154,7 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
               bs' = BS.drop len bs
               par' = s /= sn || not par -- if s == sn then not par else True
               cdts' | s == sn && not par = cdts
-                    | otherwise = Joints.insert' cdts (sn,s) i_n
+                    | otherwise = Joints.insert cdts (sn,s) i_n
           go mdl' ss' par' buf' cdts' i_n' s bs'
       where
         exts = Trie.keys $ Trie.submap bs trie

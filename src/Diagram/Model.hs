@@ -215,16 +215,18 @@ nLoss n k01 = eliasCodeLen n' - eliasCodeLen n
 
 -- | Given the number of symbols `m` (length of the counts vector), the
 -- length of the string `n` (sum of counts), the count of a symbol to be
--- introduced `k` (a joint count), return the first variable term of the
--- reduced loss expression. Always negative.
+-- introduced `k` (a joint count), return the third term of the
+-- difference in code length, in bits, of the serialization. Always
+-- negative.
 kLoss :: Int -> Int -> Int -> Double
 kLoss m n = \k -> iLogFactorial (x - k) - iLogFactorial x
   where x = m - 1 + n
 
--- | Given a joint countwhere the left and right parts are two (2)
+-- | Given a joint count where the left and right parts are two (2)
 -- different symbols (so s0 /= s1) and the count of the left `k0` and
--- right `k1` part of the introduced joint, return the second variable
--- term of the reduced loss expression. Always positive.
+-- right `k1` part of the introduced joint, return the fourth term of
+-- the difference in code length, in bits, of the serialization. Always
+-- positive.
 sLoss2 :: Int -> Int -> Int -> Double
 sLoss2 k01 k0 k1 = iLogFactorial k0 + iLogFactorial k1
                    - iLogFactorial k0' - iLogFactorial k1'
@@ -232,10 +234,10 @@ sLoss2 k01 k0 k1 = iLogFactorial k0 + iLogFactorial k1
   where k0' = k0 - k01
         k1' = k1 - k01
 
--- | Given a joint countwhere the left and right parts are two (2)
--- different symbols (so s0 /= s1) and the count of the left `k0` and
--- right `k1` part of the introduced joint, return the second variable
--- term of the reduced loss expression.
+-- | Given a joint count where the left and right parts are the same
+-- symbol (s0 == s1) and the count of the part `k0`, return the fourth
+-- term of the difference in code length, in bits, of the
+-- serialization. Always positive.
 sLoss1 :: Int -> Int -> Double
 sLoss1 k00 k0 = iLogFactorial k0 - iLogFactorial k0' - iLogFactorial k00
   where k0' = k0 - 2*k00
