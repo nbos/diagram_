@@ -31,19 +31,22 @@ import Diagram.Util
 
 type Doubly s = D.Doubly MVector s Sym
 
-type Joints = Map (Sym,Sym) (Int, IntSet)
-type JointsByLoss = IntMap -- k01 :: Int ->
-                    ( Double -- ( sLossMinBound :: Double
-                    , Map Double -- , sLoss :: Double ->
-                          (Map (Sym,Sym) IntSet) ) -- (s0,s1) -> is )
+-- | Location and count of each joint in the string
+type ByJoint = Map (Sym,Sym) (Int,IntSet)
+
+-- | Joints and their locations by their counts and loss
+type ByCount = IntMap -- k01 :: Int ->
+               ( Double -- ( sLossMinBound :: Double
+               , Map Double -- , sLoss :: Double ->
+                 (Map (Sym,Sym) IntSet) ) -- (s0,s1) -> is :: (Sym,Sym) -> IntSet )
 
 -- | Construction using the indices of the doubly-linked list
-fromList :: PrimMonad m => Doubly (PrimState m) -> m Joints
+fromList :: PrimMonad m => Doubly (PrimState m) -> m ByJoint
 fromList = fmap fst
            . fromList_ M.empty
            . D.streamWithKey
 
-fromList_ :: Monad m => Joints -> Stream (Of (Index,Sym)) m r -> m (Joints, r)
+fromList_ :: Monad m => ByJoint -> Stream (Of (Index,Sym)) m r -> m (ByJoint, r)
 fromList_ m0 iss0 = (S.next iss0 >>=) $ \case
   Left r -> return (m0, r)
   Right ((i0,s0),iss0') -> go i0 s0 m0 iss0'
@@ -59,7 +62,7 @@ fromList_ m0 iss0 = (S.next iss0 >>=) $ \case
 
 -- | Given the vector of symbol counts (priors), index the joints by
 -- their counts (k01) first and loss (sLoss) second.
-byLoss :: PrimMonad m => U.MVector (PrimState m) Int -> Joints -> m JointsByLoss
+byLoss :: PrimMonad m => U.MVector (PrimState m) Int -> ByJoint -> m ByCount
 byLoss ks jts = do
   im <- IM.fromListWith (M.unionWith $ M.unionWith err) <$>
         mapM mkEntry (M.toList jts)
@@ -79,7 +82,7 @@ byLoss ks jts = do
 
 -- | Given the number of symbols and length of the string, return the
 -- joints that have the minimal loss
-findMin :: Int -> Int -> JointsByLoss -> (Double, Map (Sym,Sym) IntSet)
+findMin :: Int -> Int -> ByCount -> (Double, Map (Sym,Sym) IntSet)
 findMin m n im = case IM.toDescList im of
   [] -> error "Jonints.findMin: empty set of joints"
   (k01,(_,sLossMap)):rest -> go (loss,jts) rest
@@ -109,17 +112,17 @@ findMin m n im = case IM.toDescList im of
 sLossMinBound :: Int -> Double
 sLossMinBound = iLogFactorial -- == (\k -> sLoss2 k k k)
 
-insert' :: Joints -> (Sym,Sym) -> Index -> Joints
+insert' :: ByJoint -> (Sym,Sym) -> Index -> ByJoint
 insert' jts s0s1 i = M.insertWith f s0s1 (1, IS.singleton i) jts
   where f _ (n,is) = (n + 1, IS.insert i is)
 
 -- | The union of two sets of counts + indices
-union' :: Joints -> Joints -> Joints
+union' :: ByJoint -> ByJoint -> ByJoint
 union' = M.mergeWithKey (const f) id id
   where f (a,s) (b,t) = nothingIf ((== 0) . fst) (a + b, IS.union s t)
 
 -- | Subtrack the counts + indices in the second map from the first map
-difference' :: Joints -> Joints -> Joints
+difference' :: ByJoint -> ByJoint -> ByJoint
 difference' = M.mergeWithKey (const f) id id
   where f (a,s) (b,t) = nothingIf ((== 0) . fst) (a - b, IS.difference s t)
 
@@ -131,7 +134,7 @@ type Boxed = B.MVector
 -- substitutes the left (s0) part of the joint and the right part (s1)
 -- gets freed.
 delta :: forall m r. PrimMonad m => (Sym,Sym) -> Sym ->
-         Doubly (PrimState m) -> Stream (Of Index) m r -> m ((Joints, Joints), r)
+         Doubly (PrimState m) -> Stream (Of Index) m r -> m ((ByJoint, ByJoint), r)
 delta _ _ (D.Doubly Nothing _ _ _ _) is0 = ((M.empty, M.empty), ) <$> S.effects is0
 delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
   s0s1ref <- newPrimRef      @Boxed     IS.empty -- (s0,s1) (-) (redundant (n01))
@@ -255,7 +258,7 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
 
 -- | Re-compute the joint counts + locations to check the validity of a
 -- given joints map. Throws an error if they differ.
-validate :: PrimMonad m => Joints -> Doubly (PrimState m) -> a -> m a
+validate :: PrimMonad m => ByJoint -> Doubly (PrimState m) -> a -> m a
 validate cdts ss a = do
   cdtsRef <- fromList ss
   when (cdts /= cdtsRef) $

@@ -30,7 +30,7 @@ import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Model
-import Diagram.Joints (Joints,Doubly)
+import Diagram.Joints (ByJoint,Doubly)
 import qualified Diagram.Joints as Joints
 import Diagram.Progress
 import Diagram.Util
@@ -48,7 +48,7 @@ data Mesh s = Mesh {
   fwdRules :: !(Map (Sym,Sym) Sym), -- ^ Forward rules
   extTrie :: !(Trie ()), -- ^ Extensions of all symbols
   extLens :: !(U.Vector Int), -- ^ Length of extension of all symbols
-  candidates :: !Joints -- ^ Joint counts + locations
+  candidates :: !ByJoint -- ^ Joint counts + locations
 }
 
 full :: Mesh s -> Bool
