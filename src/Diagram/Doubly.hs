@@ -196,6 +196,13 @@ jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
           else go nxt
         else go nxt
 
+-- | Substitute the element at the given index and the next with the
+-- given element. Assumes the index is not of the last element.
+subst2 :: (PrimMonad m, MVector v a) => a -> Doubly v (PrimState m) a ->
+          Index -> m (Doubly v (PrimState m) a)
+subst2 s01 l i = modify l (const s01) i
+                 >> next l i >>= delete l
+
 -- | Append an element at the begining of the list. Grows the structure
 -- in case there are no free spaces.
 -- TODO: return index?
@@ -264,6 +271,25 @@ trySnoc (Doubly (Just i0) (i:free) elems prevs nexts) a = do
 
   return $ Just (i, Doubly (Just i0) free elems prevs nexts)
 {-# INLINABLE trySnoc #-}
+
+-- | Try to remove the first element from the list
+tryUncons :: (PrimMonad m, MVector v a) =>
+             Doubly v (PrimState m) a -> m (Maybe (a, Doubly v (PrimState m) a))
+tryUncons (Doubly Nothing _ _ _ _) = return Nothing
+tryUncons l@(Doubly (Just i0) _ _ _ _) = do a <- read l i0
+                                            l' <- delete l i0
+                                            return $ Just (a,l')
+{-# INLINABLE tryUncons #-}
+
+-- | Try to remove the last element from the list
+tryUnsnoc :: (PrimMonad m, MVector v a) =>
+             Doubly v (PrimState m) a -> m (Maybe (Doubly v (PrimState m) a, a))
+tryUnsnoc (Doubly Nothing _ _ _ _) = return Nothing
+tryUnsnoc l@(Doubly (Just i0) _ _ _ _) = do i <- prev l i0
+                                            a <- read l i
+                                            l' <- delete l i
+                                            return $ Just (l',a)
+{-# INLINABLE tryUnsnoc #-}
 
 -- | Shift the list left by 1, placing the first element last
 shiftL :: (PrimMonad m, MVector v a) =>

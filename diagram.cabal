@@ -64,6 +64,7 @@ executable diagram
                       Diagram.Model
                       Diagram.Joints
                       Diagram.Doubly
+                      Diagram.Source
                       Diagram.Dynamic
                       Diagram.Progress
                       Diagram.Streaming

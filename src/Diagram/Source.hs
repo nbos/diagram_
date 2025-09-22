@@ -1,0 +1,103 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections, LambdaCase #-}
+module Diagram.Source (module Diagram.Source) where
+
+import Control.Monad hiding (join)
+import Control.Monad.Primitive (PrimMonad(PrimState))
+
+import Data.Word (Word8)
+import Data.Maybe
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
+import Data.Trie (Trie)
+import qualified Data.Trie as Trie
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+
+import Streaming hiding (second,join)
+import qualified Streaming.Prelude as S
+import Diagram.Streaming () -- PrimMonad instance
+
+import Diagram.Rules (Rules,Sym)
+import qualified Diagram.Rules as R
+import qualified Diagram.Doubly as D
+import Diagram.Joints (Doubly)
+import Diagram.Util
+
+-- | Wrapper around a stream of bytes from source file to optimally
+-- produce fully constructed symbols upon request.
+data Source m r = Source {
+  buffer :: !(Doubly (PrimState m)),  -- ^ Partial constructions
+  bufExt :: !ByteString,              -- ^ Extension of the buffer
+  fwdRules :: !(Map (Sym,Sym) Sym),   -- ^ Construction rules (s0,s1) -> s01
+  extensions :: !(IntMap ByteString), -- ^ Extensions by symbol
+  extTrie :: !(Trie ()),              -- ^ Extensions trie
+  atoms :: !(Stream (Of Word8) m r)   -- ^ Raw bytes from source file
+}
+
+new :: PrimMonad m => Rules -> Stream (Of Word8) m r -> m (Source m r)
+new rs as = do
+  buf <- D.new 10
+  return $ Source buf bs rsm im trie as
+  where
+    numSymbols = R.numSymbols rs
+    bs = BS.empty
+    rsm = R.toMap rs
+    exts = BS.pack . R.extension rs <$> [0..numSymbols-1]
+    im = IM.fromDistinctAscList $ zip [0..numSymbols-1] exts
+    trie = Trie.fromList $ (,()) <$> exts
+
+pushRule :: PrimMonad m => Source m r -> (Sym, Sym) -> Sym -> m (Source m r)
+pushRule (Source buf bs rsm im trie as) s0s1 s01 = do
+  buf' <- S.foldM_ (D.subst2 s01) (return buf) return $
+          D.jointIndices buf s0s1
+  return $ Source buf' bs rsm' im' trie' as
+  where
+    rsm' = M.insert s0s1 s01 rsm
+    e01 = (im IM.! fst s0s1) <> (im IM.! snd s0s1)
+    im' = IM.insert s01 e01 im
+    trie' = Trie.insert e01 () trie
+
+next :: forall m r. PrimMonad m => Rules -> Source m r -> m (Either r (Sym, Source m r))
+next rs (Source buf bs rsm im trie as)
+  | notAPrefix = (D.tryUncons buf >>=) $ \case -- pop a symbol
+      Nothing -> error "impossible"
+      Just (s,buf') -> return $ Right (s, Source buf' bs' rsm im trie as)
+          where bs' = BS.drop (BS.length $ im IM.! s) bs
+
+  | otherwise = (S.next as >>=) $ \case -- read/append an atom
+      Left r -> (D.tryUncons buf >>=) $ \case -- pop a symbol
+        Nothing -> return $ Left r
+        Just (s,buf') -> return $ Right (s, Source buf' bs' rsm im trie as')
+          where bs' = BS.drop (BS.length $ im IM.! s) bs
+                as' = return r
+
+      Right (a, as') -> do
+        buf' <- snocReduce buf $ fromEnum a -- Word8 -> Int
+        let bs' = BS.snoc bs a
+        next rs $ Source buf' bs' rsm im trie as' -- rec
+
+  where
+    exts = Trie.keys $ Trie.submap bs trie
+    notAPrefix = null exts || exts == [bs]
+
+    snocReduce :: Doubly (PrimState m) -> Int -> m (Doubly (PrimState m))
+    snocReduce ss s1 = (D.last ss >>=) $ \case
+      Just s0 | not (null constrs) -> foldM snocReduce ss recip01
+                                      >>= flip snocReduce s01
+        where
+          s01 = minimum constrs
+          recip01 = R.lRecip rs s0 (fst $ rs R.! s01)
+          constrs = catMaybes $
+                    -- check for a construction between s0 and s1, and
+                    (M.lookup (s0,s1) rsm :) $
+                    -- check for a construction overriding one in s0...
+                    fmap (\suf0 -> let (_,r0) = rs R.! suf0
+                                   in M.lookup (r0,s1) rsm
+                                      >>= nothingIf (>= suf0)) $
+                    -- ...over composite suffixes of s0
+                    init $ R.suffixes rs s0
+
+      _else -> snd <$> D.snoc ss s1 -- drop index

@@ -23,7 +23,6 @@ import Diagram.Streaming () -- PrimMonad instance
 
 import Diagram.Rules (Sym)
 import qualified Diagram.Rules as R
-import Diagram.Doubly (Index)
 import qualified Diagram.Doubly as D
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Model
@@ -91,12 +90,12 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie cdts) (s0,s1) = do
                  S.each i01s
   let cdts' = (cdts `Joints.difference` rm) `Joints.union` am
 
-  ss' <- S.foldM_ (subst1 s01) (return ss) return $
+  ss' <- S.foldM_ (D.subst2 s01) (return ss) return $
          withPB n01 (here "Modifying string in place") $
          S.each i01s
 
   par' <- checkParity ss'
-  buf' <- S.foldM_ (subst1 s01) (return buf) return $
+  buf' <- S.foldM_ (D.subst2 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
 
   return (s01, Mesh mdl' ss' par' buf' rsm' trie' cdts')
@@ -106,13 +105,6 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie cdts) (s0,s1) = do
     (n01, i01s) = second IS.toList . fromMaybe err $ M.lookup (s0,s1) cdts
     bs01 = R.bytestring rs s0 <> R.bytestring rs s1
     trie' = Trie.insert bs01 () trie
-
--- | Substitute the symbol at the given index and the next with the
--- given symbol
-subst1 :: PrimMonad m => Sym -> Doubly (PrimState m) -> Index ->
-                         m (Doubly (PrimState m))
-subst1 s01 l i = D.modify l (const s01) i >>
-                 D.next l i >>= D.delete l
 
 -- | While there is free space in the symbol string and the buffer is
 -- not the prefix of any potential symbol, append the fully constructed
