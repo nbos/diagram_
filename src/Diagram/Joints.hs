@@ -38,7 +38,7 @@ type ByJoint = Map (Sym,Sym) (Int,IntSet)
 type ByCount = IntMap -- k01 :: Int ->
                ( Double -- ( sLossMinBound :: Double
                , Map Double -- , sLoss :: Double ->
-                 (Map (Sym,Sym) IntSet) ) -- (s0,s1) -> is :: (Sym,Sym) -> IntSet )
+                 (Map (Sym,Sym) IntSet) ) -- (s0,s1) -> is )
 
 -- | Construction using the indices of the doubly-linked list
 fromList :: PrimMonad m => Doubly (PrimState m) -> m ByJoint
@@ -85,12 +85,12 @@ sLossMinBound = iLogFactorial -- == (\k -> sLoss2 k k k)
 
 -- | Given the number of symbols and length of the string, return the
 -- joints that have the minimal loss
-findMin :: Int -> Int -> ByCount -> (Double, Map (Sym,Sym) IntSet)
+findMin :: Int -> Int -> ByCount -> (Double, ByJoint)
 findMin symbolCount n im = case IM.toDescList im of
   [] -> error "Joints.findMin: empty set of joints"
   (k01,(_,m)):rest -> go (loss,jts) rest
     where
-      (sLoss,jts) = M.findMin m
+      (sLoss,jts) = (k01,) <<$>> M.findMin m
       nLoss = fromIntegral $ Mdl.nLoss n k01
       kLoss = Mdl.kLoss symbolCount n k01
       loss = rLoss + sLoss + nLoss + kLoss
@@ -109,7 +109,7 @@ findMin symbolCount n im = case IM.toDescList im of
         kLoss = Mdl.kLoss symbolCount n k01
         rnkLoss = rLoss + nLoss + kLoss
         lossMinBound = rnkLoss + sMinBound
-        (sLoss,jts) = M.findMin m
+        (sLoss,jts) = (k01,) <<$>> M.findMin m
         loss = rnkLoss + sLoss
 
 -- | Given a symbol count vector, a map of joints indexed by their
@@ -221,7 +221,8 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
             unless (inext == ihead) $ do
               next <- readSym inext
               MV.modify nxtvec' (IS.insert i0') next -- (s01,next) (+)
-              if next /= s1 then MV.modify nextvec (IS.insert i1') next -- (s1,next) (-)
+              if next /= s1
+                then MV.modify nextvec (IS.insert i1') next -- (s1,next) (-)
                 else if s0 == s1 then return () -- there was no (s1,next) joint
                 else do -- switch parity
                 n1 <- S.length_ $ S.break (/= s1) $ D.streamFrom ss i1'
@@ -348,14 +349,15 @@ countJointsM_ m0 ss0 = (S.next ss0 >>=) $ \case
 naiveRecountM :: forall m r. PrimMonad m =>
                  Doubly (PrimState m) -> (Sym,Sym) -> Int ->
                  Stream (Of Int) m r -> m (Map (Int, Int) Int, r)
-naiveRecountM (D.Doubly Nothing _ _ _ _) _ _ is0 = (M.empty, ) <$> S.effects is0
+naiveRecountM (D.Doubly Nothing _ _ _ _) _ _ is0 =
+  (M.empty, ) <$> S.effects is0
 naiveRecountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
   s0s1ref <- newPrimRef      @U.MVector     0 -- (s0,s1) (-) (redundant)
   s1s0ref <- newPrimRef      @U.MVector     0 -- (s1,s0) (-)
   prevvec <- MV.replicate @_ @U.MVector s01 0 -- (i,s01) (-/+)
   nextvec <- MV.replicate @_ @U.MVector s01 0 -- (s01,i) (-/+)
-  s0s0ref <- newPrimRef      @U.MVector     0 -- (s0,s0) (+) (prev[s0] correction)
-  s1s1ref <- newPrimRef      @U.MVector     0 -- (s1,s1) (+) (next[s1] correction)
+  s0s0ref <- newPrimRef @U.MVector 0 -- (s0,s0) (+) (prev[s0] correction)
+  s1s1ref <- newPrimRef @U.MVector 0 -- (s1,s1) (+) (next[s1] correction)
   autoref <- newPrimRef      @U.MVector     0 -- (s01,s01) (+)
 
   -- <loop>
@@ -391,8 +393,8 @@ naiveRecountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
                 MV.modify nextvec (+1) next
                 when (next == s1) $ do -- check parity
                   n1 <- if s0 == s1 then return 3
-                        else do (+1) <$> S.length_ ( S.break (/= s1) $
-                                                     D.streamFrom ss inext)
+                        else (+1) <$> S.length_ ( S.break (/= s1) $
+                                                  D.streamFrom ss inext)
                   when (odd n1) $ modifyPrimRef s1s1ref (+1) -- -1+1 == 0
               go is'' -- continue
   -- </loop>

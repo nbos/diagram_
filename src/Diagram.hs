@@ -14,6 +14,10 @@ import Text.Printf (printf)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
+
+import qualified Data.Vector.Unboxed as U
+import qualified Data.Vector.Generic.Mutable as MV
+
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
@@ -43,16 +47,17 @@ main = do
   csvHandle <- openFile logFilePath WriteMode
 
   let strLen = min maxStrLen $ fromInteger srcByteLen
+      sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
   (msh0, asrc0) <- Mesh.fromStream strLen $
                    withPB strLen "Initializing mesh" $
                    S.splitAt maxStrLen $
                    Q.unpack $ Q.fromHandle srcHandle
   -- <main loop>
   case () of
-    _ -> go msh0 (S.map fromEnum asrc0) -- go
+    _ -> go sls0 msh0 (S.map fromEnum asrc0) -- go
 
       where
-      go msh@(Mesh mdl@(Model rs _ _) _ _ _ _ _ _ cdts) src = do
+      go sls msh@(Mesh mdl@(Model rs _ ks) _ _ _ _ _ cdts) src = do
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
 
         cdtList <- S.toList_ $
@@ -72,9 +77,13 @@ main = do
             forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
 
+        -- O(numSymbols), could be made dynamic, byteLen bookkept too
+        let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
+        meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
+        --
+
         -- <log stats>
         (rsInfo, nInfo, ksInfo, ssInfo) <- Mdl.informationParts mdl
-        meshByteLen <- Mesh.extLen msh
         let info = rsInfo + nInfo + ksInfo + ssInfo
             ratio = info / fromIntegral (meshByteLen * 8)
             factor = recip ratio
@@ -116,7 +125,7 @@ main = do
 
           else Mesh.pushRule msh (s0,s1)
                >>= flip fill src . snd
-               >>= uncurry go -- (msh'', src')
+               >>= uncurry (go sls') -- (msh'', src')
   -- </main loop>
 
   where

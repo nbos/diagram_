@@ -17,9 +17,6 @@ import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 import qualified Data.ByteString as BS
 
-import qualified Data.Vector.Unboxed as U
-import qualified Data.Vector.Generic.Mutable as MV
-
 import Streaming hiding (second,join)
 import qualified Streaming.Prelude as S
 import Diagram.Streaming () -- PrimMonad instance
@@ -47,18 +44,11 @@ data Mesh s = Mesh {
   buffer :: !(Doubly s), -- ^ Right buffer of partial constructions
   fwdRules :: !(Map (Sym,Sym) Sym), -- ^ Forward rules
   extTrie :: !(Trie ()), -- ^ Extensions of all symbols
-  extLens :: !(U.Vector Int), -- ^ Length of extension of all symbols
   candidates :: !ByJoint -- ^ Joint counts + locations
 }
 
 full :: Mesh s -> Bool
-full (Mesh _ ss _ _ _ _ _ _) = D.full ss
-
--- | O(numSymbols). The length of the string's extension. Could be
--- bookkept if we get to that point.
-extLen :: PrimMonad m => Mesh (PrimState m) -> m Int
-extLen (Mesh (Model _ _ ks) _ _ _ _ _ sls _) =
-  MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
+full (Mesh _ ss _ _ _ _ _) = D.full ss
 
 checkParity :: PrimMonad m => Doubly (PrimState m) -> m Bool
 checkParity ss = (S.next (D.revStream ss) >>=) $ \case
@@ -82,17 +72,16 @@ fromStream n str = do
       even <$> S.length_ (S.takeWhile (== sn) revRest)
 
   buf <- D.new 10 -- could be bigger
-  return (Mesh mdl ss par buf rsm trie sls cdts, r)
+  return (Mesh mdl ss par buf rsm trie cdts, r)
 
   where
     rsm = M.empty
     trie = Trie.fromList $ (,()) . BS.pack . (:[]) <$> [0..255]
-    sls = U.replicate 256 1
 
 -- | Add a rule, rewrite, with progress bars
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh (PrimState m) -> (Sym,Sym) -> m (Sym, Mesh (PrimState m))
-pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
+pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie cdts) (s0,s1) = do
   (s01, mdl') <- Model.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
       rsm' = M.insert (s0,s1) s01 rsm
@@ -110,14 +99,13 @@ pushRule (Mesh mdl@(Model rs _ _) ss _ buf rsm trie sls cdts) (s0,s1) = do
   buf' <- S.foldM_ (subst1 s01) (return buf) return $
           D.jointIndices buf (s0,s1)
 
-  (s01,) <$> flush (Mesh mdl' ss' par' buf' rsm' trie' sls' cdts')
+  return (s01, Mesh mdl' ss' par' buf' rsm' trie' cdts')
 
   where
     err = error $ "not a candidate: " ++ show (s0,s1)
     (n01, i01s) = second IS.toList . fromMaybe err $ M.lookup (s0,s1) cdts
     bs01 = R.bytestring rs s0 <> R.bytestring rs s1
     trie' = Trie.insert bs01 () trie
-    sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
 
 -- | Substitute the symbol at the given index and the next with the
 -- given symbol
@@ -130,7 +118,7 @@ subst1 s01 l i = D.modify l (const s01) i >>
 -- not the prefix of any potential symbol, append the fully constructed
 -- symbols at the head of the buffer to the end of the symbol string
 flush :: PrimMonad m => Mesh (PrimState m) -> m (Mesh (PrimState m))
-flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
+flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie cdts0)
   | D.full ss0 = return msh
   | otherwise = do
       in0 <- fromMaybe err <$> D.last ss0
@@ -143,7 +131,7 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
     err = error "Mesh.flush: empty mesh case not implemented"
     go !mdl !ss !par !buf !cdts !i_n !sn !bs
       | D.full ss || prefixing = -- D.null buf ==> prefixing
-          return $ Mesh mdl ss par buf rsm trie sls cdts -- end
+          return $ Mesh mdl ss par buf rsm trie cdts -- end
       | otherwise = do -- assert $ not (D.null buf || D.null ss)
           let i0buf = fromJust $ D.head buf
           s <- D.read buf i0buf
@@ -162,7 +150,7 @@ flush msh@(Mesh mdl0@(Model rs _ _) ss0 par0 buf0 rsm trie sls cdts0)
 
 snoc :: forall m. PrimMonad m =>
         Mesh (PrimState m) -> Sym -> m (Mesh (PrimState m))
-snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _ _) s = do
+snoc msh@(Mesh (Model rs _ _) _ _ buf0 rsm _ _) s = do
   buf <- go buf0 s
   flush $ msh{ buffer = buf }
   where

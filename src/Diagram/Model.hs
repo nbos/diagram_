@@ -38,14 +38,14 @@ data Model s = Model {
 empty :: PrimMonad m => m (Model (PrimState m))
 empty = Model R.empty 0 <$> U.unsafeThaw (U.replicate 256 0)
 
-incCounts :: PrimMonad m => Model (PrimState m) -> [Sym] ->
-                            m (Model (PrimState m))
+incCounts :: PrimMonad m =>
+             Model (PrimState m) -> [Sym] -> m (Model (PrimState m))
 incCounts = foldM incCount
 
-incCount :: PrimMonad m => Model (PrimState m) -> Sym ->
-                           m (Model (PrimState m))
-incCount (Model rs n ks) s =
-  MV.modify ks (+1) s >> return (Model rs (n+1) ks)
+incCount :: PrimMonad m =>
+            Model (PrimState m) -> Sym -> m (Model (PrimState m))
+incCount (Model rs n ks) s = MV.modify ks (+1) s
+                             >> return (Model rs (n+1) ks)
 
 -- | Reconstruction from rule set and fully constructed symbol string
 fromList :: PrimMonad m => Rules -> [Sym] -> m (Model (PrimState m))
