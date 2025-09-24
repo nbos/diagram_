@@ -41,24 +41,29 @@ type ByCount = IntMap -- k01 :: Int ->
                  (Map (Sym,Sym) IntSet) ) -- (s0,s1) -> is )
 
 -- | Construction using the indices of the doubly-linked list
-fromList :: PrimMonad m => Doubly (PrimState m) -> m ByJoint
-fromList = fmap fst
-           . fromList_ M.empty
-           . D.streamWithKey
+fromDoubly :: PrimMonad m => Doubly (PrimState m) -> m ByJoint
+fromDoubly = fmap fst
+             . fromStream_ M.empty
+             . D.streamWithKey
 
-fromList_ :: Monad m => ByJoint -> Stream (Of (Index,Sym)) m r -> m (ByJoint, r)
-fromList_ m0 iss0 = (S.next iss0 >>=) $ \case
+fromStream :: Monad m => Stream (Of (Index,Sym)) m r -> m (ByJoint, r)
+fromStream = fromStream_ M.empty
+
+fromStream_ :: Monad m => ByJoint -> Stream (Of (Index,Sym)) m r -> m (ByJoint, r)
+fromStream_ m0 iss0 = (S.next iss0 >>=) $ \case
   Left r -> return (m0, r)
-  Right ((i0,s0),iss0') -> go i0 s0 m0 iss0'
-  where
-    go i0 s0 !m iss = (S.next iss >>=) $ \case
-      Left r -> return (m,r) -- end
-      Right ((i1,s1),ss') -> (S.next ss' >>=) $ \case
-        Left r -> return (m', r) -- last joint
-        Right (is2@(_,s2),ss'') -> f m' $ S.yield is2 >> ss''
-          where f | s0 == s1 && s1 == s2 = fromList_ -- even
-                  | otherwise            = go i1 s1     -- odd
-        where m' = insert m (s0,s1) i0
+  Right (i0s0,iss0') -> fromStreamOdd_ i0s0 m0 iss0'
+
+fromStreamOdd_ :: Monad m => (Index, Sym) -> ByJoint ->
+                  Stream (Of (Index, Sym)) m r -> m (ByJoint, r)
+fromStreamOdd_ (i0,s0) !m iss = (S.next iss >>=) $ \case
+  Left r -> return (m,r) -- end
+  Right (i1s1@(_,s1),ss') -> (S.next ss' >>=) $ \case
+    Left r -> return (m', r) -- last joint
+    Right (is2@(_,s2),ss'') -> f m' $ S.yield is2 >> ss''
+      where f | s0 == s1 && s1 == s2 = fromStream_         -- even
+              | otherwise            = fromStreamOdd_ i1s1 -- odd
+    where m' = insert m (s0,s1) i0
 
 -- | Given the vector of symbol counts (priors), index the joints by
 -- their counts (k01) first and loss (sLoss) second.
@@ -295,7 +300,7 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
 -- given joints map. Throws an error if they differ.
 validate :: PrimMonad m => ByJoint -> Doubly (PrimState m) -> a -> m a
 validate cdts ss a = do
-  cdtsRef <- fromList ss
+  cdtsRef <- fromDoubly ss
   when (cdts /= cdtsRef) $
     let cdtsSet = Set.fromList $ M.toList cdts
         refSet = Set.fromList $ M.toList cdtsRef

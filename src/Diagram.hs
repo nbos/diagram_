@@ -48,16 +48,16 @@ main = do
 
   let strLen = min maxStrLen $ fromInteger srcByteLen
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
-  (msh0, asrc0) <- Mesh.fromStream strLen $
-                   withPB strLen "Initializing mesh" $
-                   S.splitAt maxStrLen $
-                   Q.unpack $ Q.fromHandle srcHandle
+  msh0 <- Mesh.fromStream strLen $
+          withPB strLen "Initializing mesh" $
+          S.splitAt maxStrLen $
+          Q.unpack $ Q.fromHandle srcHandle
   -- <main loop>
   case () of
-    _ -> go sls0 msh0 (S.map fromEnum asrc0) -- go
+    _ -> go sls0 msh0 -- go
 
       where
-      go sls msh@(Mesh mdl@(Model rs _ ks) _ _ _ _ _ cdts) src = do
+      go sls msh@(Mesh mdl@(Model rs _ ks) _ _ cdts _) = do
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
 
         cdtList <- S.toList_ $
@@ -122,19 +122,11 @@ main = do
         if minLoss > 0
           then putStrLn (here "Reached minimum. Terminating.")
                >> hClose csvHandle -- end
-
           else Mesh.pushRule msh (s0,s1)
-               >>= flip fill src . snd
-               >>= uncurry (go sls') -- (msh'', src')
+               >>= go sls' . snd -- continue
   -- </main loop>
 
   where
-    fill msh src
-      | Mesh.full msh = return (msh,src)
-      | otherwise = (S.next src >>=) $ \case
-          Left r -> return (msh, return r)
-          Right (s,src') -> Mesh.snoc msh s >>= flip fill src'
-
     showCdt rs (loss,((s0,s1),(n01,_))) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
       loss n01 s0 s1
       (show $ R.toString rs [s0])

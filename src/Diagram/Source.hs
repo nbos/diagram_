@@ -1,5 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections, LambdaCase #-}
+{-# LANGUAGE InstanceSigs #-}
 module Diagram.Source (module Diagram.Source) where
 
 import Control.Monad hiding (join)
@@ -37,6 +38,10 @@ data Source m r = Source {
   atoms :: !(Stream (Of Word8) m r)   -- ^ Raw bytes from source file
 }
 
+instance Monad m => Functor (Source m) where
+  fmap :: Monad m => (a -> b) -> Source m a -> Source m b
+  fmap f src = src { atoms = fmap f (atoms src) }
+
 new :: PrimMonad m => Rules -> Stream (Of Word8) m r -> m (Source m r)
 new rs as = do
   buf <- D.new 10
@@ -49,8 +54,8 @@ new rs as = do
     im = IM.fromDistinctAscList $ zip [0..numSymbols-1] exts
     trie = Trie.fromList $ (,()) <$> exts
 
-pushRule :: PrimMonad m => Source m r -> (Sym, Sym) -> Sym -> m (Source m r)
-pushRule (Source buf bs rsm im trie as) s0s1 s01 = do
+pushRule :: PrimMonad m => (Sym, Sym) -> Sym -> Source m r -> m (Source m r)
+pushRule s0s1 s01 (Source buf bs rsm im trie as) = do
   buf' <- S.foldM_ (D.subst2 s01) (return buf) return $
           D.jointIndices buf s0s1
   return $ Source buf' bs rsm' im' trie' as
@@ -60,7 +65,23 @@ pushRule (Source buf bs rsm im trie as) s0s1 s01 = do
     im' = IM.insert s01 e01 im
     trie' = Trie.insert e01 () trie
 
-next :: forall m r. PrimMonad m => Rules -> Source m r -> m (Either r (Sym, Source m r))
+-- | Produce a stream of at most `n` fully constructed symbols from the
+-- source, given a rule set equal or superset of any rule set previously
+-- given to the source.
+splitAt :: PrimMonad m => Rules -> Int -> Source m r ->
+           Stream (Of Sym) m (Source m r)
+splitAt rs = go
+  where
+    go n src | n <= 0 = return src
+             | otherwise = (lift (next rs src) >>=) $ \case
+                 Left r -> return $ src{ atoms = return r }
+                 Right (s, src') -> S.yield s >> go (n-1) src'
+
+-- | Produce a fully constructed symbol from the source, if not yet
+-- empty, given a rule set equal or superset of any rule set previously
+-- given to the source.
+next :: forall m r. PrimMonad m =>
+        Rules -> Source m r -> m (Either r (Sym, Source m r))
 next rs (Source buf bs rsm im trie as)
   | notAPrefix = (D.tryUncons buf >>=) $ \case -- pop a symbol
       Nothing -> error "impossible"
