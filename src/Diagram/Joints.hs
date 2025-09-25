@@ -12,6 +12,7 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IS
+import Data.Set (Set)
 import qualified Data.Set as Set
 
 import qualified Data.Vector.Strict as B
@@ -29,33 +30,26 @@ import qualified Diagram.Model as Mdl
 import Diagram.Information
 import Diagram.Util
 
+-- | Count and location of each candidate/joint symbol in the string
+type Joints = Map (Sym,Sym) (Int,IntSet)
+
 type Doubly s = D.Doubly MVector s Sym
-
--- | Location and count of each joint in the string
-type ByJoint = Map (Sym,Sym) (Int,IntSet)
-
--- | Joints and their locations by their counts and loss
-type ByCount = IntMap -- k01 :: Int ->
-               ( Double -- ( sLossMinBound :: Double
-               , Map Double -- , sLoss :: Double ->
-                 (Map (Sym,Sym) IntSet) ) -- (s0,s1) -> is )
-
 -- | Construction using the indices of the doubly-linked list
-fromDoubly :: PrimMonad m => Doubly (PrimState m) -> m ByJoint
+fromDoubly :: PrimMonad m => Doubly (PrimState m) -> m Joints
 fromDoubly = fmap fst
              . fromStream_ M.empty
              . D.streamWithKey
 
-fromStream :: Monad m => Stream (Of (Index,Sym)) m r -> m (ByJoint, r)
+fromStream :: Monad m => Stream (Of (Index,Sym)) m r -> m (Joints, r)
 fromStream = fromStream_ M.empty
 
-fromStream_ :: Monad m => ByJoint -> Stream (Of (Index,Sym)) m r -> m (ByJoint, r)
+fromStream_ :: Monad m => Joints -> Stream (Of (Index,Sym)) m r -> m (Joints, r)
 fromStream_ m0 iss0 = (S.next iss0 >>=) $ \case
   Left r -> return (m0, r)
   Right (i0s0,iss0') -> fromStreamOdd_ i0s0 m0 iss0'
 
-fromStreamOdd_ :: Monad m => (Index, Sym) -> ByJoint ->
-                  Stream (Of (Index, Sym)) m r -> m (ByJoint, r)
+fromStreamOdd_ :: Monad m => (Index, Sym) -> Joints ->
+                  Stream (Of (Index, Sym)) m r -> m (Joints, r)
 fromStreamOdd_ (i0,s0) !m iss = (S.next iss >>=) $ \case
   Left r -> return (m,r) -- end
   Right (i1s1@(_,s1),ss') -> (S.next ss' >>=) $ \case
@@ -63,105 +57,18 @@ fromStreamOdd_ (i0,s0) !m iss = (S.next iss >>=) $ \case
     Right (is2@(_,s2),ss'') -> f m' $ S.yield is2 >> ss''
       where f | s0 == s1 && s1 == s2 = fromStream_         -- even
               | otherwise            = fromStreamOdd_ i1s1 -- odd
-    where m' = insert m (s0,s1) i0
+    where m' = insert1 m (s0,s1) i0
 
--- | Given the vector of symbol counts (priors), index the joints by
--- their counts (k01) first and loss (sLoss) second.
-byCount :: PrimMonad m => U.MVector (PrimState m) Int -> ByJoint -> m ByCount
-byCount getCount jts = do
-  im <- IM.fromListWith (M.unionWith $ M.unionWith err) <$>
-        mapM mkEntry (M.toList jts)
-  return $ IM.mapWithKey (\k01 e -> (sLossMinBound k01, e)) im
-  where
-    err = error "Joints.byLoss: collision"
-    mkEntry ((s0,s1),(k01,is))
-      | s0 == s1 = do
-          k0 <- MV.read getCount s0
-          return (k01, M.singleton (Mdl.sLoss1 k01 k0) $
-                       M.singleton (s0,s1) is)
-      | otherwise = do
-          k0 <- MV.read getCount s0
-          k1 <- MV.read getCount s1
-          return (k01, M.singleton (Mdl.sLoss2 k01 k0 k1) $
-                       M.singleton (s0,s1) is)
-
-sLossMinBound :: Int -> Double
-sLossMinBound = iLogFactorial -- == (\k -> sLoss2 k k k)
-
--- | Given the number of symbols and length of the string, return the
--- joints that have the minimal loss
-findMin :: Int -> Int -> ByCount -> (Double, ByJoint)
-findMin symbolCount n im = case IM.toDescList im of
-  [] -> error "Joints.findMin: empty set of joints"
-  (k01,(_,m)):rest -> go (loss,jts) rest
-    where
-      (sLoss,jts) = (k01,) <<$>> M.findMin m
-      nLoss = fromIntegral $ Mdl.nLoss n k01
-      kLoss = Mdl.kLoss symbolCount n k01
-      loss = rLoss + sLoss + nLoss + kLoss
-  where
-    err = error "Joints.findMin: collision"
-    rLoss = Mdl.rLoss symbolCount
-    go e [] = e
-    go e@(bestLoss, bestJts) ((k01,(sMinBound,m)):rest)
-      | lossMinBound > bestLoss = e -- end
-      | otherwise = case compare loss bestLoss of
-          EQ -> go (loss, M.unionWith err bestJts jts) rest -- append
-          LT -> go (loss, jts) rest -- replace
-          GT -> go e rest -- continue
-      where
-        nLoss = fromIntegral $ Mdl.nLoss n k01
-        kLoss = Mdl.kLoss symbolCount n k01
-        rnkLoss = rLoss + nLoss + kLoss
-        lossMinBound = rnkLoss + sMinBound
-        (sLoss,jts) = (k01,) <<$>> M.findMin m
-        loss = rnkLoss + sLoss
-
--- | Given a symbol count vector, a map of joints indexed by their
--- count, a count where the joint is indexed, the joint and a sized set
--- of locations insert or delete the new locations in the map,
--- maintaining order and invariants, depending on the sign of the size:
--- positive inserts, negative deletes.
-update :: PrimMonad m => U.MVector (PrimState m) Int ->
-          ByCount -> Int -> (Sym,Sym) -> (Int,IntSet) -> m ByCount
-update ks im k01 (s0,s1) (n01,newIs) = do
-  k0 <- MV.read ks s0
-  k1 <- MV.read ks s1
-  let sLossOf | s0 == s1  = flip  Mdl.sLoss1 k0
-              | otherwise = flip2 Mdl.sLoss2 k0 k1
-  -- delete
-  let sLoss = sLossOf k01
-      e01 = im IM.! k01
-      sle = snd e01 M.! sLoss
-      oldIs = sle M.! (s0,s1) -- assert (IS.size is == k01)
-      msle' = nothingIf M.null $ M.delete (s0,s1) sle
-      e01' = sequence $ second (nothingIf M.null
-                                . M.update (const msle') sLoss) e01
-      im' = IM.update (const e01') k01 im
-  -- insert
-  let k01' = k01 + n01
-      sLoss' = sLossOf k01'
-      is | n01 >= 0  = IS.union newIs oldIs
-         | otherwise = IS.difference newIs oldIs
-  if IS.null is then return im'
-    else let e = (sLossMinBound k01', M.singleton sLoss' $
-                                      M.singleton (s0,s1) is)
-         in return $ IM.insertWith (second
-                                    . M.unionWith (M.unionWith err)
-                                    . snd) k01' e im'
-
-  where err = error "Joints.insert: collision"
-
-insert :: ByJoint -> (Sym,Sym) -> Index -> ByJoint
-insert jts s0s1 i = M.insertWith f s0s1 (1, IS.singleton i) jts
+insert1 :: Joints -> (Sym,Sym) -> Index -> Joints
+insert1 jts s0s1 i = M.insertWith f s0s1 (1, IS.singleton i) jts
   where f _ (n,is) = (n + 1, IS.insert i is)
 
 -- | The union of two sets of counts + indices
-union :: ByJoint -> ByJoint -> ByJoint
+union :: Joints -> Joints -> Joints
 union = M.unionWith $ \(a,s) (b,t) -> (a + b, IS.union s t)
 
 -- | Subtract the counts + indices in the second map from the first map
-difference :: ByJoint -> ByJoint -> ByJoint
+difference :: Joints -> Joints -> Joints
 difference = M.mergeWithKey (const f) id id
   where f (a,s) (b,t) = nothingIf ((== 0) . fst) (a - b, IS.difference s t)
 
@@ -172,9 +79,11 @@ type Boxed = B.MVector
 -- were the constructions to take place assuming that the construction
 -- substitutes the left (s0) part of the joint and the right part (s1)
 -- gets freed.
-delta :: forall m r. PrimMonad m => (Sym,Sym) -> Sym ->
-         Doubly (PrimState m) -> Stream (Of Index) m r -> m ((ByJoint, ByJoint), r)
-delta _ _ (D.Doubly Nothing _ _ _ _) is0 = ((M.empty, M.empty), ) <$> S.effects is0
+delta :: forall m r. PrimMonad m =>
+         (Sym,Sym) -> Sym -> Doubly (PrimState m) ->
+         Stream (Of Index) m r -> m ((Joints, Joints), r)
+delta _ _ (D.Doubly Nothing _ _ _ _) is0 = ((M.empty, M.empty), )
+                                           <$> S.effects is0
 delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
   s0s1ref <- newPrimRef      @Boxed     IS.empty -- (s0,s1) (-) (redundant (n01))
   s1s0ref <- newPrimRef      @Boxed     IS.empty -- (s1,s0) (-)
@@ -213,12 +122,15 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
                   modifyPrimRef s0s0ref $ IS.insert iprev
 
             -- s0s1's
-            n <- S.length_ $ S.span (== (s0,s1)) $ sChunks2 $ D.streamFrom ss i0
-            i0i1s <- S.toList_ $ S.splitAt n $ sChunks2 $ D.streamKeysFrom ss i0
+            n <- S.length_ $ S.span (== (s0,s1)) $
+                 sChunks2 $ D.streamFrom ss i0
+            i0i1s <- S.toList_ $ S.splitAt n $
+                     sChunks2 $ D.streamKeysFrom ss i0
             modifyPrimRef s0s1ref $ insertList $ fst <$> i0i1s
             unless (s0 == s1) $
               modifyPrimRef s1s0ref $ insertList $ init $ snd <$> i0i1s
-            modifyPrimRef autoref $ insertList $ fst . fst <$> lChunks2 i0i1s
+            modifyPrimRef autoref $ insertList $
+              fst . fst <$> lChunks2 i0i1s
 
             -- next
             let (i0',i1') = last i0i1s
@@ -228,7 +140,7 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
               MV.modify nxtvec' (IS.insert i0') next -- (s01,next) (+)
               if next /= s1
                 then MV.modify nextvec (IS.insert i1') next -- (s1,next) (-)
-                else if s0 == s1 then return () -- there was no (s1,next) joint
+                else if s0 == s1 then return () -- was no (s1,next) joint
                 else do -- switch parity
                 n1 <- S.length_ $ S.break (/= s1) $ D.streamFrom ss i1'
                 i1s <- S.toList_ $ S.take n1 $ D.streamKeysFrom ss i1'
@@ -298,7 +210,7 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
 
 -- | Re-compute the joint counts + locations to check the validity of a
 -- given joints map. Throws an error if they differ.
-validate :: PrimMonad m => ByJoint -> Doubly (PrimState m) -> a -> m a
+validate :: PrimMonad m => Joints -> Doubly (PrimState m) -> a -> m a
 validate cdts ss a = do
   cdtsRef <- fromDoubly ss
   when (cdts /= cdtsRef) $
@@ -308,6 +220,84 @@ validate cdts ss a = do
        ++ "should include: " ++ show (refSet Set.\\ cdtsSet) ++ "\n"
        ++ "not:            " ++ show (cdtsSet Set.\\ refSet)
   return a
+
+----------------------------
+-- JOINTS INDEXED BY LOSS --
+----------------------------
+
+-- | Candidates by their counts and loss
+type ByLoss = IntMap -- k01 :: Int ->
+              ( Double -- ( sLossMinBound :: Double
+              , Map Double -- , sLoss :: Double ->
+                    (Set (Sym,Sym)) ) -- [(s0,s1)] :: [(Sym,Sym)] )
+
+-- | Given the vector of symbol counts (priors), index the joints by
+-- their counts (k01) first and loss (sLoss) second.
+byLoss :: PrimMonad m => U.MVector (PrimState m) Int -> Joints -> m ByLoss
+byLoss mks jts = do
+  im <- IM.fromListWith (M.unionWith Set.union) <$>
+        mapM (uncurry mkEntry) (M.toList jts) -- TODO: M.fold
+  return $ IM.mapWithKey (\k01 e -> (sLossMinBound k01, e)) im
+  where
+    mkEntry (s0,s1) (k01,_)
+      | s0 == s1 = do
+          k0 <- MV.read mks s0
+          return (k01, M.singleton (Mdl.sLoss1 k01 k0) $
+                       Set.singleton (s0,s1))
+      | otherwise = do
+          k0 <- MV.read mks s0
+          k1 <- MV.read mks s1
+          return (k01, M.singleton (Mdl.sLoss2 k01 k0 k1) $
+                       Set.singleton (s0,s1))
+
+sLossMinBound :: Int -> Double
+sLossMinBound = iLogFactorial -- == (\k -> sLoss2 k k k)
+
+-- | Given the number of symbols and length of the string, return the
+-- joints that have the minimal loss
+findMin :: Int -> Int -> ByLoss -> (Double, [(Sym,Sym)])
+findMin symbolCount n im = case IM.toDescList im of
+  [] -> error "Joints.findMin: no joints in map"
+  (k01,(_,m)):rest -> go (loss,jts) rest
+    where
+      (sLoss,jts) = Set.toList <$> M.findMin m
+      nLoss = fromIntegral $ Mdl.nLoss n k01
+      kLoss = Mdl.kLoss symbolCount n k01
+      loss = rLoss + sLoss + nLoss + kLoss
+  where
+    rLoss = Mdl.rLoss symbolCount
+    go e [] = e
+    go e@(bestLoss, bestJts) ((k01,(sMinBound,m)):rest)
+      | lossMinBound > bestLoss = e -- end
+      | otherwise = case compare loss bestLoss of
+          EQ -> go (loss, jts ++ bestJts) rest -- append
+          LT -> go (loss, jts) rest -- replace
+          GT -> go e rest -- continue
+      where
+        nLoss = fromIntegral $ Mdl.nLoss n k01
+        kLoss = Mdl.kLoss symbolCount n k01
+        rnkLoss = rLoss + nLoss + kLoss
+        lossMinBound = rnkLoss + sMinBound
+        (sLoss,jts) = Set.toList <$> M.findMin m
+        loss = rnkLoss + sLoss
+
+insertLoss :: (Int,(Int,Int)) -> (Sym,Sym) -> ByLoss -> ByLoss
+insertLoss (k01,(k0,k1)) (s0,s1) = IM.insertWith f k01 ( sLossMinBound k01
+                                                       , M.singleton sLoss is )
+  where
+    sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
+          | otherwise = Mdl.sLoss2 k01 k0 k1
+    f _ (b,m) = (b, M.insertWith f' sLoss is m)
+    f' _ = Set.insert (s0,s1)
+    is = Set.singleton (s0,s1)
+
+deleteLoss :: (Int,(Int,Int)) -> (Sym,Sym) -> ByLoss -> ByLoss
+deleteLoss (k01,(k0,k1)) (s0,s1) = IM.update f k01
+  where
+    sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
+          | otherwise = Mdl.sLoss2 k01 k0 k1
+    f (b,m) = (b,) <$> nothingIf M.null (M.update f' sLoss m)
+    f' = nothingIf Set.null . Set.delete (s0,s1)
 
 
 ---------------

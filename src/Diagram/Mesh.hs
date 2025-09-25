@@ -19,7 +19,7 @@ import qualified Diagram.Rules as R
 import qualified Diagram.Doubly as D
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Model
-import Diagram.Joints (ByJoint,Doubly)
+import Diagram.Joints (Joints,Doubly)
 import qualified Diagram.Joints as Joints
 import Diagram.Source (Source)
 import qualified Diagram.Source as Source
@@ -34,7 +34,7 @@ data Mesh m r = Mesh {
   model :: !(Model (PrimState m)),   -- ^ String's model :: (rs,n,ks)
   string :: !(Doubly (PrimState m)), -- ^ Fixed size underlying string
   parity :: !Bool,       -- ^ Number of times last symbol is repeated
-  candidates :: !ByJoint, -- ^ Joint counts + locations
+  candidates :: !Joints, -- ^ Joint counts + locations
   source :: !(Source m r)
 }
 
