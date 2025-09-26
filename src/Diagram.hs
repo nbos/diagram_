@@ -57,7 +57,7 @@ main = do
     _ -> go sls0 msh0 -- go
 
       where
-      go sls msh@(Mesh mdl@(Model rs _ ks) _ _ cdts _) = do
+      go sls msh@(Mesh mdl@(Model rs _ ks) _ _ cdts _ _ _) = do
         let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
 
         cdtList <- S.toList_ $

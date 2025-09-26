@@ -10,10 +10,10 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
-import Data.IntSet (IntSet)
-import qualified Data.IntSet as IS
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IS
 
 import qualified Data.Vector.Strict as B
 import qualified Data.Vector.Unboxed as U

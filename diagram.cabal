@@ -82,16 +82,13 @@ executable diagram
                     , text
                     , time
                     , extra
-                    , binary
                     , vector
-                    , deepseq
                     , hashable
                     , filepath
                     , primitive
                     , directory
                     , streaming
                     , containers
-                    , exceptions
                     , bytestring
                     , utf8-string
                     , bytestring-trie
