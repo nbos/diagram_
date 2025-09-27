@@ -21,9 +21,10 @@ import qualified Data.Vector.Generic.Mutable as MV
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
+import qualified Diagram.Rules as R
 import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
-import qualified Diagram.Rules as R
+import qualified Diagram.Joints as Joints
 import Diagram.Mesh (Mesh(Mesh))
 import qualified Diagram.Mesh as Mesh
 import Diagram.Progress
@@ -57,18 +58,22 @@ main = do
     _ -> go sls0 msh0 -- go
 
       where
-      go sls msh@(Mesh mdl@(Model rs _ ks) _ _ cdts _ _ _) = do
-        let here = (++) (" [" ++ show (R.numSymbols rs) ++ "]: ")
+      go sls msh@(Mesh mdl@(Model rs n ks) _ _ jts _ ls _) = do
+        let numSymbols = R.numSymbols rs
+            here = (++) (" [" ++ show numSymbols ++ "]: ")
+            (minLoss, s0s1s) = Joints.findMin numSymbols n ls
+            (s0,s1) = head s0s1s
+            (n01,_) = jts M.! (s0,s1)
 
         cdtList <- S.toList_ $
-          S.mapM (\cdt@(s0s1,(n01,_)) -> do
-                     loss <- Mdl.naiveInfoDelta mdl s0s1 n01
+          S.mapM (\cdt@(s0s1,(n01',_)) -> do
+                     loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
                      return (loss,cdt)) $
-          withPB (M.size cdts) (here "Computing losses") $
-          S.each $ M.toList cdts
+          withPB (M.size jts) (here "Computing losses (TODO: remove)") $
+          S.each $ M.toList jts
 
-        putStrLn $ here "Sorting candidates..."
-        (minLoss,((s0,s1),(n01,_))) <- case L.sort cdtList of
+        putStrLn $ here "Sorting candidates (TODO: remove)..."
+        (minLoss',((s0',s1'),(_n01',_))) <- case L.sort cdtList of
           [] -> error "no candidates"
           (c@(loss,_):cdts') -> do
             when (loss < 0) $ putStrLn $ here $
@@ -76,6 +81,10 @@ main = do
             putStrLn $ here "Next top candidates:"
             forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
+
+        when (minLoss /= minLoss' || notElem (s0',s1') s0s1s) $ error $
+          "loss mismatch:\nfrom map:   " ++ show (minLoss, s0s1s)
+          ++ "\nfrom naive: " ++ show (minLoss', [(s0',s1')])
 
         -- O(numSymbols), could be made dynamic, byteLen bookkept too
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
