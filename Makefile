@@ -6,7 +6,7 @@ default: debug
 .PHONY: debug
 debug:
 	@echo "Building debug version..."
-	cabal build --ghc-options="-O0"
+	cabal build --enable-profiling --ghc-options="-O0 -prof -fprof-auto"
 	@echo "Debug build complete."
 
 # Release build with full optimization and additional options

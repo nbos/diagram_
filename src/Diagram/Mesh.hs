@@ -99,42 +99,41 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
   (s01, mdl'@(Model rs' _ _)) <- Mdl.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
 
+  str' <- S.foldM_ (D.subst2 s01) (return str) return $
+          withPB n01 (here "Modifying string in place") $
+          S.each i01s
+  par' <- checkParity str'
+  src' <- Source.pushRule (s0,s1) s01 src
+
+  -- :: update joints books :: --
   ((am,rm),_) <- Joints.delta (s0,s1) s01 str $
                  withPB n01 (here "Computing change on candidates") $
                  S.each i01s
   let jts' = (jts `Joints.difference` rm) `Joints.union` am
 
-  str' <- S.foldM_ (D.subst2 s01) (return str) return $
-         withPB n01 (here "Modifying string in place") $
-         S.each i01s
-  par' <- checkParity str'
-
-  let newJoints = am `M.difference` jts  -- should be disjoint
-      notJoints = rm `M.difference` jts' -- ┘
-
-  bp' <- MV.grow bp 1 -- cloned
+  bp' <- MV.grow bp 1 -- (cloned)
   MV.write bp' s01 Set.empty
-  forM_ (M.keys newJoints) $ \jt -> do
+  -- add newly introduced joints at their parts (bp)
+  forM_ (M.keys $ am `M.difference` jts) $ \jt -> do
     MV.modify bp' (Set.insert jt) $ fst jt
     MV.modify bp' (Set.insert jt) $ snd jt
-  forM_ (M.keys notJoints) $ \jt -> do
+  -- remove now eliminated joints at their parts (bp)
+  forM_ (M.keys $ rm `M.difference` jts') $ \jt -> do
     MV.modify bp' (Set.delete jt) $ fst jt
     MV.modify bp' (Set.delete jt) $ snd jt
 
-  jts0 <- MV.read bp s0
-  jts1 <- MV.read bp s1
-  let jtsAffected = M.keysSet (rm `M.union` am)
-                    `Set.union` (jts0 `Set.union` jts1)
-
-  src' <- Source.pushRule (s0,s1) s01 src
-
-  (jtsAffected', msh') <- (S.next (Source.splitAt rs' n01 src') >>=) $ \case
-    Left src'' -> return (jtsAffected, Mesh mdl' str' par' jts' bp' ls src'')
+  -- :: fill mesh with new symbols :: --
+  (observed, am', Mesh mdl'' str'' par'' jts'' bp'' ls' src'') <-
+    (S.next (Source.splitAt rs' n01 src') >>=) $ \case
+    Left src'' -> return ( IS.empty, M.empty
+                         , Mesh mdl' str' par' jts' bp' ls src'')
     Right (s_0,ss) -> do
       i_n' <- fromMaybe (error "empty Mesh") <$> D.last str'
       ns' <- D.read str' i_n'
-      (symAffected :> (mdl'' :> (am', str'' :> src''))) <-
-        S.fold (flip IS.insert) IS.empty id $
+
+      -- in one pass
+      (observed :> (mdl'' :> (am', str'' :> src''))) <-
+        S.fold (flip IS.insert) IS.empty id $ -- record inc'd symbols
         S.foldM Mdl.incCount (return mdl') return $ S.copy $ -- inc Model counts
         S.map snd $ -- now, only for the Sym, dropping Index
         ( if par' then Joints.fromStreamOdd_ (i_n',ns') -- odd
@@ -147,34 +146,43 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
                 (return (error "_|_", str)) return $
         withPB n01 "Filling mesh back to capacity" $
         S.yield s_0 >> ss
-
-      jtsAffected' <- foldM (\set s -> Set.union set <$> MV.read bp' s)
-                      jtsAffected $ IS.toList symAffected
+      --
 
       par'' <- checkParity str''
-      let jts'' = jts' `Joints.union` am'
-          newJoints' = am' `M.difference` jts'
-      forM_ (M.keys newJoints') $ \jt -> do
+      forM_ (M.keys $ am' `M.difference` jts') $ \jt -> do
         MV.modify bp' (Set.insert jt) $ fst jt
         MV.modify bp' (Set.insert jt) $ snd jt
 
-      return (jtsAffected', Mesh mdl'' str'' par'' jts'' bp' ls src'')
+      let jts'' = jts' `Joints.union` am'
+      return (observed, am', Mesh mdl'' str'' par'' jts'' bp' ls src'')
 
-  let Mesh mdl''@(Model _ _ ks'') str'' par'' jts'' bp'' ls' src'' = msh'
-  ls'' <- flip3 S.foldM_ (return ls') return
-          (withPB (Set.size jtsAffected') "Updating loss map" $
-           S.each jtsAffected') $
-          \im jt -> do k0 <- MV.read ks $ fst jt
-                       k1 <- MV.read ks $ snd jt
-                       let k01 = fst $ jts M.! jt
-                           key = (k01,(k0,k1))
+  -- :: delete and re-insert in loss map :: --
+  let affectedSymbols = IS.insert s0 $ IS.insert s1 observed
+  affectedJoints <- -- (this could be improved but it's the simplest)
+    fmap (Set.unions . (M.keysSet (M.unions [am,rm,am']):))$
+    mapM (MV.read bp) $ IS.toList affectedSymbols
 
-                       k0' <- MV.read ks'' $ fst jt
-                       k1' <- MV.read ks'' $ snd jt
-                       let k01' = fst $ jts'' M.! jt
-                           key' = (k01',(k0',k1'))
+  let lossesToDelete = M.restrictKeys jts   affectedJoints
+      lossesToInsert = M.restrictKeys jts'' affectedJoints
 
-                       return $ Joints.insertLoss key' jt $
-                         Joints.deleteLoss key jt im
+      deleteLoss im (jt,(k01,_)) = do
+        k0 <- MV.read ks $ fst jt
+        k1 <- MV.read ks $ snd jt
+        let key = (k01,(k0,k1))
+        return $ Joints.deleteLoss key jt im
+
+      Model _ _ ks'' = mdl''
+      insertLoss im (jt,(k01,_)) = do
+        k0 <- MV.read ks'' $ fst jt
+        k1 <- MV.read ks'' $ snd jt
+        let key' = (k01,(k0,k1))
+        return $ Joints.insertLoss key' jt im
+
+  ls'' <- flip2 (S.foldM_ insertLoss) return
+          ( withPB (M.size lossesToInsert) "Inserting losses" $
+            S.each $ M.toList lossesToInsert ) $
+          S.foldM_ deleteLoss (return ls') return $
+          withPB (M.size lossesToDelete) "Deleting losses" $
+          S.each $ M.toList lossesToDelete
 
   return (s01, Mesh mdl'' str'' par'' jts'' bp'' ls'' src'')

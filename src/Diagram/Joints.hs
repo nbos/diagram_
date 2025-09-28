@@ -263,7 +263,7 @@ findMin symbolCount n im = case IM.toDescList im of
       (sLoss,jts) = Set.toList <$> M.findMin m
       nLoss = fromIntegral $ Mdl.nLoss n k01
       kLoss = Mdl.kLoss symbolCount n k01
-      loss = rLoss + sLoss + nLoss + kLoss
+      loss = rLoss + nLoss + kLoss + sLoss
   where
     rLoss = Mdl.rLoss symbolCount
     go e [] = e

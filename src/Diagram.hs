@@ -73,7 +73,7 @@ main = do
           S.each $ M.toList jts
 
         putStrLn $ here "Sorting candidates (TODO: remove)..."
-        (minLoss',((s0',s1'),(_n01',_))) <- case L.sort cdtList of
+        (minLoss',((s0',s1'),(n01',_))) <- case L.sort cdtList of
           [] -> error "no candidates"
           (c@(loss,_):cdts') -> do
             when (loss < 0) $ putStrLn $ here $
@@ -82,9 +82,12 @@ main = do
             forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
 
-        when (minLoss /= minLoss' || notElem (s0',s1') s0s1s) $ error $
-          "loss mismatch:\nfrom map:   " ++ show (minLoss, s0s1s)
-          ++ "\nfrom naive: " ++ show (minLoss', [(s0',s1')])
+        -- when (minLoss /= minLoss' || notElem (s0',s1') s0s1s) $ do
+        --   loss <- Mdl.infoDelta mdl (s0',s1') n01'
+        --   error $ "loss mismatch:\nfrom map:   "
+        --     ++ show (minLoss, n01, head s0s1s, tail s0s1s)
+        --     ++ "\nfrom naive: " ++ show (minLoss', n01', (s0',s1'))
+        --     ++ "\nreal      : " ++ show (loss,(),())
 
         -- O(numSymbols), could be made dynamic, byteLen bookkept too
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]

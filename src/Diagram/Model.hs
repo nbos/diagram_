@@ -128,8 +128,8 @@ information mdl = do
   (rsInfo, nInfo, ksInfo, ssInfo) <- informationParts mdl
   return $ rsInfo + nInfo + ksInfo + ssInfo
 
-informationParts :: PrimMonad m => Model (PrimState m) ->
-                                   m (Double, Double, Double, Double)
+informationParts :: PrimMonad m =>
+                    Model (PrimState m) -> m (Double, Double, Double, Double)
 informationParts mdl@(Model rs n ks) =
   (rsInfo, nInfo, ksInfo, ) <$> ssInfo
   where
@@ -137,6 +137,20 @@ informationParts mdl@(Model rs n ks) =
     nInfo = eliasInfo n
     ksInfo = distrInfo n (MV.length ks)
     ssInfo = stringInfo mdl
+
+codeLen :: PrimMonad m => Model (PrimState m) -> m Int
+codeLen mdl = do
+  (rsLen, nLen, ksLen, ssLen) <- codeLenParts mdl
+  return $ rsLen + nLen + ksLen + ssLen
+
+codeLenParts :: PrimMonad m =>
+                Model (PrimState m) -> m (Int, Int, Int, Int)
+codeLenParts mdl = do
+  (rsInfo, nInfo, ksInfo, ssInfo) <- informationParts mdl
+  return ( ceiling rsInfo
+         , ceiling nInfo
+         , ceiling ksInfo
+         , ceiling ssInfo)
 
 -- ΔI
 
