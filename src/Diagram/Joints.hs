@@ -80,8 +80,8 @@ type Boxed = B.MVector
 -- substitutes the left (s0) part of the joint and the right part (s1)
 -- gets freed.
 delta :: forall m r. PrimMonad m =>
-         (Sym,Sym) -> Sym -> Doubly (PrimState m) ->
-         Stream (Of Index) m r -> m ((Joints, Joints), r)
+         (Sym,Sym) -> Sym -> Doubly (PrimState m) -> Stream (Of Index) m r ->
+         m ((Joints, Joints), r)
 delta _ _ (D.Doubly Nothing _ _ _ _) is0 = ((M.empty, M.empty), )
                                            <$> S.effects is0
 delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do

@@ -48,6 +48,7 @@ main = do
   csvHandle <- openFile logFilePath WriteMode
 
   let strLen = min maxStrLen $ fromInteger srcByteLen
+      codeLen0 = strLen * 8
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
   msh0 <- Mesh.fromStream strLen $
           withPB strLen "Initializing mesh" $
@@ -55,13 +56,41 @@ main = do
           Q.unpack $ Q.fromHandle srcHandle
   -- <main loop>
   case () of
-    _ -> go sls0 msh0 -- go
+    _ -> go codeLen0 sls0 msh0 -- go
 
       where
-      go sls msh@(Mesh mdl@(Model rs n ks) _ _ jts _ ls _) = do
+      go codeLen sls msh@(Mesh mdl@(Model rs n ks) _ _ jts _ ls _) = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
-            (minLoss, s0s1s) = Joints.findMin numSymbols n ls
+
+        -- :: Print stats to STDOUT :: -
+        meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
+        (mCodeLen, rsCodeLen, nCodeLen
+          , ksCodeLen, ssCodeLen) <- Mdl.codeLenParts mdl
+        let codeLen' = mCodeLen + rsCodeLen + nCodeLen + ksCodeLen + ssCodeLen
+            ratio = fromIntegral codeLen'
+                    / fromIntegral (meshByteLen * 8) :: Double
+            factor = recip ratio
+            srcCoverage = fromIntegral meshByteLen
+                          / fromIntegral srcByteLen :: Double
+        putStrLn ""
+        putStrLn $ here $ printf "DELTA LEN: %s bits" $
+          commaize (codeLen' - codeLen)
+        putStrLn $ here $
+          printf ("LEN: %s bits (%s + %s + %s + %s + %s), %.2f%% of orig., "
+                  ++ "factor: %.4f, over %.2f%% of input")
+          (commaize codeLen')
+          (commaize mCodeLen)
+          (commaize rsCodeLen)
+          (commaize nCodeLen)
+          (commaize ksCodeLen)
+          (commaize ssCodeLen)
+          (ratio * 100)
+          factor
+          (100 * srcCoverage)
+
+        -- :: Find next rule :: --
+        let (minLoss, s0s1s) = Joints.findMin numSymbols n ls
             (s0,s1) = head s0s1s
             (n01,_) = jts M.! (s0,s1)
 
@@ -82,60 +111,35 @@ main = do
             forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
 
-        -- when (minLoss /= minLoss' || notElem (s0',s1') s0s1s) $ do
-        --   loss <- Mdl.infoDelta mdl (s0',s1') n01'
-        --   error $ "loss mismatch:\nfrom map:   "
-        --     ++ show (minLoss, n01, head s0s1s, tail s0s1s)
-        --     ++ "\nfrom naive: " ++ show (minLoss', n01', (s0',s1'))
-        --     ++ "\nreal      : " ++ show (loss,(),())
+        when (minLoss /= minLoss' || notElem (s0',s1') s0s1s) $ do
+          loss <- Mdl.infoDelta mdl (s0',s1') n01'
+          error $ "loss mismatch:\nfrom map:   "
+            ++ show (minLoss, n01, head s0s1s, tail s0s1s)
+            ++ "\nfrom naive: " ++ show (minLoss', n01', (s0',s1'))
+            ++ "\nreal      : " ++ show (loss,(),())
 
-        -- O(numSymbols), could be made dynamic, byteLen bookkept too
-        let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
-        meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
-        --
-
-        -- <log stats>
-        (rsInfo, nInfo, ksInfo, ssInfo) <- Mdl.informationParts mdl
-        let info = rsInfo + nInfo + ksInfo + ssInfo
-            ratio = info / fromIntegral (meshByteLen * 8)
-            factor = recip ratio
-            srcCoverage = fromIntegral meshByteLen
-                          / fromIntegral srcByteLen :: Double
-        -- STDOUT
-        putStrLn $ here $ "LEN: " ++
-          printf ("%s bits (%s + %s + %s + %s), %.2f%% of orig., "
-                  ++ "factor: %.4f, over %.2f%% of input")
-          (commaize $ ceiling @_ @Int info)
-          (commaize $ ceiling @_ @Int rsInfo)
-          (commaize $ ceiling @_ @Int nInfo)
-          (commaize $ ceiling @_ @Int ksInfo)
-          (commaize $ ceiling @_ @Int ssInfo)
-          (ratio * 100)
-          factor
-          (100 * srcCoverage)
-        -- CSV
+        -- :: Print stats to CSV :: --
         hPutStrLn csvHandle $
-          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
+          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
           (R.numSymbols rs) factor -- %d, %.4f
-          (ceiling @_ @Int info) -- %d
-          (ceiling @_ @Int rsInfo) -- %d
-          (ceiling @_ @Int nInfo) -- %d
-          (ceiling @_ @Int ksInfo) -- %d
-          (ceiling @_ @Int ssInfo) -- %d
+          codeLen' -- %d
+          mCodeLen
+          rsCodeLen -- %d
+          nCodeLen -- %d
+          ksCodeLen -- %d
+          ssCodeLen -- %d
           s0 s1 n01 minLoss -- %d, %d, %d, %f
           (R.toEscapedString rs [s0])
           (R.toEscapedString rs [s1])
           (R.toEscapedString rs [s0,s1])
         hFlush csvHandle
-        putStrLn ""
-        -- </log stats>
 
         -- [EXIT]
         if minLoss > 0
           then putStrLn (here "Reached minimum. Terminating.")
                >> hClose csvHandle -- end
-          else Mesh.pushRule msh (s0,s1)
-               >>= go sls' . snd -- continue
+          else let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
+               in Mesh.pushRule msh (s0,s1) >>= go codeLen' sls' . snd -- continue
   -- </main loop>
 
   where

@@ -125,30 +125,31 @@ decode bv
 -- | Information in bits of the given model + a sampled symbol string
 information :: PrimMonad m => Model (PrimState m) -> m Double
 information mdl = do
-  (rsInfo, nInfo, ksInfo, ssInfo) <- informationParts mdl
-  return $ rsInfo + nInfo + ksInfo + ssInfo
+  (mInfo, rsInfo, nInfo, ksInfo, ssInfo) <- informationParts mdl
+  return $ fromIntegral mInfo + rsInfo + fromIntegral nInfo + ksInfo + ssInfo
 
 informationParts :: PrimMonad m =>
-                    Model (PrimState m) -> m (Double, Double, Double, Double)
+                    Model (PrimState m) -> m (Int, Double, Int, Double, Double)
 informationParts mdl@(Model rs n ks) =
-  (rsInfo, nInfo, ksInfo, ) <$> ssInfo
+  (mInfo, rsInfo, nInfo, ksInfo, ) <$> ssInfo
   where
-    rsInfo = R.information rs
-    nInfo = eliasInfo n
+    (mInfo, rsInfo) = R.informationParts rs
+    nInfo = eliasCodeLen n
     ksInfo = distrInfo n (MV.length ks)
     ssInfo = stringInfo mdl
 
 codeLen :: PrimMonad m => Model (PrimState m) -> m Int
 codeLen mdl = do
-  (rsLen, nLen, ksLen, ssLen) <- codeLenParts mdl
-  return $ rsLen + nLen + ksLen + ssLen
+  (mLen, rsLen, nLen, ksLen, ssLen) <- codeLenParts mdl
+  return $ mLen + rsLen + nLen + ksLen + ssLen
 
 codeLenParts :: PrimMonad m =>
-                Model (PrimState m) -> m (Int, Int, Int, Int)
+                Model (PrimState m) -> m (Int, Int, Int, Int, Int)
 codeLenParts mdl = do
-  (rsInfo, nInfo, ksInfo, ssInfo) <- informationParts mdl
-  return ( ceiling rsInfo
-         , ceiling nInfo
+  (mCodeLen, rsInfo, nCodeLen, ksInfo, ssInfo) <- informationParts mdl
+  return ( mCodeLen
+         , ceiling rsInfo
+         , nCodeLen
          , ceiling ksInfo
          , ceiling ssInfo)
 

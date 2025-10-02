@@ -32,7 +32,6 @@ import qualified Streaming.Prelude as S
 import qualified Codec.Elias.Natural as Elias
 import qualified Codec.Arithmetic.Variety as Var
 import Codec.Arithmetic.Variety.BitVec (BitVec)
-import qualified Codec.Arithmetic.Variety.BitVec as BV
 
 import Diagram.Util
 import Diagram.Information
@@ -305,11 +304,14 @@ decode bv = do
 -- | The amount of information (in bits) in the rule set (more
 -- efficient)
 information :: Rules -> Double
-information rs = lenCodeInfo + rulesCodeInfo
+information rs = fromIntegral lenCodeLen + rsInfo
+  where (lenCodeLen, rsInfo) = informationParts rs
+
+informationParts :: Rules -> (Int, Double)
+informationParts rs = (lenCodeLen, rulesCodeInfo)
   where
     len = V.length rs
-    lenCode = Elias.encodeDelta $ fromIntegral len
-    lenCodeInfo = fromIntegral $ BV.length lenCode
+    lenCodeLen = eliasCodeLen len
     rulesCodeInfo = log2e * 2 * ( iLogFactorial (256 + len)
                                   - iLogFactorial (256 :: Int) )
 
