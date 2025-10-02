@@ -99,12 +99,6 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
   (s01, mdl'@(Model rs' _ _)) <- Mdl.pushRule mdl (s0,s1) n01
   let here = (++) (" [" ++ show s01 ++ "]: ")
 
-  str' <- S.foldM_ (D.subst2 s01) (return str) return $
-          withPB n01 (here "Modifying string in place") $
-          S.each i01s
-  par' <- checkParity str'
-  src' <- Source.pushRule (s0,s1) s01 src
-
   -- :: update joints books :: --
   ((am,rm),_) <- Joints.delta (s0,s1) s01 str $
                  withPB n01 (here "Computing change on candidates") $
@@ -121,6 +115,13 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
   forM_ (M.keys $ rm `M.difference` jts') $ \jt -> do
     MV.modify bp' (Set.delete jt) $ fst jt
     MV.modify bp' (Set.delete jt) $ snd jt
+
+  -- :: rewrite :: --
+  str' <- S.foldM_ (D.subst2 s01) (return str) return $
+          withPB n01 (here "Modifying string in place") $
+          S.each i01s
+  par' <- checkParity str'
+  src' <- Source.pushRule (s0,s1) s01 src
 
   -- :: fill mesh with new symbols :: --
   (observed, am', Mesh mdl'' str'' par'' jts'' bp'' ls' src'') <-
@@ -143,7 +144,7 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
                . fromJust) $ -- assume there is a last element
         S.last $ S.copy $ -- get last ((Index,Sym), Doubly m)
         S.scanM (\(_,l) s -> first (,s) . fromJust <$> D.trySnoc l s) -- snoc
-                (return (error "_|_", str)) return $
+                (return (error "_|_", str')) return $
         withPB n01 "Filling mesh back to capacity" $
         S.yield s_0 >> ss
       --
