@@ -172,7 +172,7 @@ codeLenParts mdl = do
 -- len(Elias(n-k01)) - len(Elias(n))
 --
 -- [Histogram]
--- log((n-k01+m-1)!) - log((n-k01)!) - log((m-1)!)
+-- log((n-k01+m)!) - log((n-k01)!) - log(m!)
 -- - log((n+m-1)!) + log(n!) + log((m-1)!)
 --
 -- [Permutation]
@@ -184,7 +184,7 @@ codeLenParts mdl = do
 -- which makes them equal to:
 --
 -- [Histogram]
--- log((n-k01+m-1)!) - log((n+m-1)!)
+-- log((n-k01+m)!) - log(m!) - log((n+m-1)!) + log((m-1)!)
 --
 -- [Permutation]
 -- log(k0!) - log(k01!)
@@ -215,8 +215,8 @@ infoLoss1 m n k00 k0 = rLoss m
                        + kLoss m n k00
                        + sLoss1 k00 k0
 
--- | Given the number of symbols `m` in a rule set, return the
--- difference in code length of its serialization.
+-- | Given the number of different symbols `m`, return the difference in
+-- code length of the serialization of the rule set.
 rLoss :: Int -> Double
 rLoss = R.infoDelta'
 
@@ -234,8 +234,8 @@ nLoss n k01 = eliasCodeLen n' - eliasCodeLen n
 -- difference in code length, in bits, of the serialization. Always
 -- negative.
 kLoss :: Int -> Int -> Int -> Double
-kLoss m n = \k -> iLogFactorial (x - k) - iLogFactorial x
-  where x = m - 1 + n
+kLoss m n k = log2e * ( iLogFactorial (n - k + m) - iLogFactorial m
+                        - iLogFactorial (n + m - 1) + iLogFactorial (m - 1) )
 
 -- | Given a joint count where the left and right parts are two (2)
 -- different symbols (so s0 /= s1) and the count of the left `k0` and
@@ -243,9 +243,9 @@ kLoss m n = \k -> iLogFactorial (x - k) - iLogFactorial x
 -- the difference in code length, in bits, of the serialization. Always
 -- positive.
 sLoss2 :: Int -> Int -> Int -> Double
-sLoss2 k01 k0 k1 = iLogFactorial k0 + iLogFactorial k1
-                   - iLogFactorial k0' - iLogFactorial k1'
-                   - iLogFactorial k01
+sLoss2 k01 k0 k1 = log2e * ( iLogFactorial k0 + iLogFactorial k1
+                             - iLogFactorial k0' - iLogFactorial k1'
+                             - iLogFactorial k01 )
   where k0' = k0 - k01
         k1' = k1 - k01
 
@@ -254,7 +254,8 @@ sLoss2 k01 k0 k1 = iLogFactorial k0 + iLogFactorial k1
 -- term of the difference in code length, in bits, of the
 -- serialization. Always positive.
 sLoss1 :: Int -> Int -> Double
-sLoss1 k00 k0 = iLogFactorial k0 - iLogFactorial k0' - iLogFactorial k00
+sLoss1 k00 k0 = log2e * ( iLogFactorial k0 - iLogFactorial k0'
+                          - iLogFactorial k00 )
   where k0' = k0 - 2*k00
 
 -- | Given two symbols, compute the difference in code length of the
@@ -271,20 +272,32 @@ infoDelta (Model rs n ks) (s0,s1) k01
 -- | Compute the change in code length (bits) of the model + symbol
 -- string matching it given a new rule introduction. Not optimized: use
 -- infoDelta instead for an exact value or infoLoss1-2.
-naiveInfoDelta :: PrimMonad m => Model (PrimState m) -> (Sym,Sym) -> Int -> m Double
-naiveInfoDelta (Model rs n ks) (s0,s1) k01 = do
+naiveInfoDelta :: PrimMonad m =>
+                  Model (PrimState m) -> (Sym,Sym) -> Int -> m Double
+naiveInfoDelta mdl s0s1 k01 = do
+  (mInfoDelta, rsInfoDelta, nInfoDelta , ksInfoDelta, ssInfoDelta) <-
+    naiveInfoDeltaParts mdl s0s1 k01
+  return $ fromIntegral mInfoDelta
+    + rsInfoDelta
+    + fromIntegral nInfoDelta
+    + ksInfoDelta
+    + ssInfoDelta
+
+naiveInfoDeltaParts :: PrimMonad m => Model (PrimState m) -> (Sym,Sym) -> Int ->
+                       m (Int, Double, Int, Double, Double)
+naiveInfoDeltaParts (Model rs n ks) (s0,s1) k01 = do
   k0 <- MV.read ks s0
   k1 <- MV.read ks s1
   -- ss a multiset permutation of counts ks:
   let ssInfoDelta = stringInfoDelta n ((s0,k0),(s1,k1)) k01
-  return $ rsInfoDelta + nInfoDelta + ksInfoDelta + ssInfoDelta
+  return (mInfoDelta, rsInfoDelta, nInfoDelta, ksInfoDelta, ssInfoDelta)
   where
     numSymbols = R.numSymbols rs
     -- rules info delta (constant):
-    rsInfoDelta = R.infoDelta rs
+    (mInfoDelta, rsInfoDelta) = R.infoDeltaParts numSymbols
     -- n elias encoding:
     n' = n - k01
-    nInfoDelta = eliasInfo n' - eliasInfo n
+    nInfoDelta = eliasCodeLen n' - eliasCodeLen n
     -- ks a distribution of n elements:
     ksInfoDelta = distrInfo n' (numSymbols + 1) -- new
                   - distrInfo n numSymbols -- old
@@ -292,14 +305,14 @@ naiveInfoDelta (Model rs n ks) (s0,s1) k01 = do
 -- I(ks) --
 
 -- | Compute the information, in bits, of a distribution of `n` elements
--- into `k` bins through "stars-and-bars"
+-- into `m` bins through "stars-and-bars"
 distrInfoWith :: (Num a, Eq a) => (a -> Double) -> a -> a -> Double
 distrInfoWith _ _ 0 = 0.0
-distrInfoWith logFact n k = log2e * ( logFact (stars + bars)
+distrInfoWith logFact n m = log2e * ( logFact (stars + bars)
                                       - logFact stars
                                       - logFact bars )
   where stars = n
-        bars = k - 1
+        bars = m - 1
 {-# INLINE distrInfoWith #-}
 
 -- | Compute the information, in bits, of a distribution of `n` elements

@@ -37,7 +37,7 @@ incPB pb = incProgress pb 1
 newPB :: Int -> String -> IO (ProgressBar ())
 newPB n message = newProgressBar style 10 (Progress 0 n ())
   where
-    width = 70 -- modify if using a smaller window
+    width = 70 -- lower if using a smaller window
     nLen = length $ show n
     exactLen = 2*nLen + 1
     message' = padOrTruncate (width - exactLen) message

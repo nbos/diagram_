@@ -14,6 +14,7 @@ import Text.Printf (printf)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
+import Numeric.MathFunctions.Comparison
 
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
@@ -64,7 +65,7 @@ main = do
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 
         -- :: Print stats to STDOUT :: -
-        meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
+        meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks -- O(m)
         (mCodeLen, rsCodeLen, nCodeLen
           , ksCodeLen, ssCodeLen) <- Mdl.codeLenParts mdl
         let codeLen' = mCodeLen + rsCodeLen + nCodeLen + ksCodeLen + ssCodeLen
@@ -74,7 +75,7 @@ main = do
             srcCoverage = fromIntegral meshByteLen
                           / fromIntegral srcByteLen :: Double
         putStrLn ""
-        putStrLn $ here $ printf "DELTA LEN: %s bits" $
+        putStrLn $ here $ printf "LEN CHANGE: %s bits" $
           commaize (codeLen' - codeLen)
         putStrLn $ here $
           printf ("LEN: %s bits (%s + %s + %s + %s + %s), %.2f%% of orig., "
@@ -91,9 +92,12 @@ main = do
 
         -- :: Find next rule :: --
         let (minLoss, s0s1s) = Joints.findMin numSymbols n ls
-            (s0,s1) = head s0s1s
-            (n01,_) = jts M.! (s0,s1)
+            (s0,s1) = head s0s1s -- TODO: something smarter?
+        k0 <- MV.read ks s0
+        k1 <- MV.read ks s1
+        let (k01,_) = jts M.! (s0,s1)
 
+        -- <verification>
         cdtList <- S.toList_ $
           S.mapM (\cdt@(s0s1,(n01',_)) -> do
                      loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
@@ -102,7 +106,7 @@ main = do
           S.each $ M.toList jts
 
         putStrLn $ here "Sorting candidates (TODO: remove)..."
-        (minLoss',((s0',s1'),(n01',_))) <- case L.sort cdtList of
+        (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
           [] -> error "no candidates"
           (c@(loss,_):cdts') -> do
             when (loss < 0) $ putStrLn $ here $
@@ -111,24 +115,32 @@ main = do
             forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
             return c
 
-        when (minLoss /= minLoss' || notElem (s0',s1') s0s1s) $ do
-          loss <- Mdl.infoDelta mdl (s0',s1') n01'
+        when (relativeError minLoss minLoss' > 1e-5
+              || notElem (s0',s1') s0s1s) $ do
+          let rLoss = Mdl.rLoss numSymbols
+              nLoss = Mdl.nLoss n k01
+              kLoss = Mdl.kLoss numSymbols n k01
+              sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
+                    | otherwise = Mdl.sLoss2 k01 k0 k1
+          naiveParts <- Mdl.naiveInfoDeltaParts mdl (s0',s1') k01'
           error $ "loss mismatch:\nfrom map:   "
-            ++ show (minLoss, n01, head s0s1s, tail s0s1s)
-            ++ "\nfrom naive: " ++ show (minLoss', n01', (s0',s1'))
-            ++ "\nreal      : " ++ show (loss,(),())
+            ++ show (minLoss, k01, head s0s1s, tail s0s1s)
+            ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
+            ++ "\nfrom naive: " ++ show (minLoss', k01', (s0',s1'))
+            ++ "\nfields:     " ++ show naiveParts
+        -- </verification>
 
         -- :: Print stats to CSV :: --
         hPutStrLn csvHandle $
           printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
           (R.numSymbols rs) factor -- %d, %.4f
           codeLen' -- %d
-          mCodeLen
+          mCodeLen -- %d
           rsCodeLen -- %d
           nCodeLen -- %d
           ksCodeLen -- %d
           ssCodeLen -- %d
-          s0 s1 n01 minLoss -- %d, %d, %d, %f
+          s0 s1 k01 minLoss -- %d, %d, %d, %f
           (R.toEscapedString rs [s0])
           (R.toEscapedString rs [s1])
           (R.toEscapedString rs [s0,s1])
