@@ -143,6 +143,7 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
         fmap (S.first $ snd -- we only need the last (Doubly m), drop (Index,Sym)
                . fromJust) $ -- assume there is a last element
         S.last $ S.copy $ -- get last ((Index,Sym), Doubly m)
+        S.drop 1 $ -- drop (error "_|_", str')
         S.scanM (\(_,l) s -> first (,s) . fromJust <$> D.trySnoc l s) -- snoc
                 (return (error "_|_", str')) return $
         withPB n01 "Filling mesh back to capacity" $

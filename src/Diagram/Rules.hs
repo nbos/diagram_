@@ -312,8 +312,8 @@ informationParts rs = (lenCodeLen, rulesCodeInfo)
   where
     len = V.length rs
     lenCodeLen = eliasCodeLen len
-    rulesCodeInfo = log2e * 2 * ( iLogFactorial (256 + len)
-                                  - iLogFactorial (256 :: Int) )
+    rulesCodeInfo = log2e * 2 * ( iLogFactorial (256 + len - 1)
+                                  - iLogFactorial (255 :: Int) )
 
 -- | The forward difference between the information of the rule set
 -- after adding a new rule relative to the information of the rule set

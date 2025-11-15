@@ -14,7 +14,7 @@ import Text.Printf (printf)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
-import Numeric.MathFunctions.Comparison
+-- import Numeric.MathFunctions.Comparison
 
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
@@ -52,8 +52,7 @@ main = do
       codeLen0 = strLen * 8
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
   msh0 <- Mesh.fromStream strLen $
-          withPB strLen "Initializing mesh" $
-          S.splitAt maxStrLen $
+          join $ withPB strLen "Initializing mesh" $ S.splitAt maxStrLen $
           Q.unpack $ Q.fromHandle srcHandle
   -- <main loop>
   case () of
@@ -93,47 +92,50 @@ main = do
         -- :: Find next rule :: --
         let (minLoss, s0s1s) = Joints.findMin numSymbols n ls
             (s0,s1) = head s0s1s -- TODO: something smarter?
-        k0 <- MV.read ks s0
-        k1 <- MV.read ks s1
         let (k01,_) = jts M.! (s0,s1)
 
-        -- <verification>
-        cdtList <- S.toList_ $
-          S.mapM (\cdt@(s0s1,(n01',_)) -> do
-                     loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
-                     return (loss,cdt)) $
-          withPB (M.size jts) (here "Computing losses (TODO: remove)") $
-          S.each $ M.toList jts
+        putStrLn $ here $ showCdt rs (minLoss,((s0,s1),(k01, error "_|_")))
 
-        putStrLn $ here "Sorting candidates (TODO: remove)..."
-        (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
-          [] -> error "no candidates"
-          (c@(loss,_):cdts') -> do
-            when (loss < 0) $ putStrLn $ here $
-                              "Intro: \n   " ++ showCdt rs c
-            putStrLn $ here "Next top candidates:"
-            forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
-            return c
+        -- -- <verification>
+        -- k0 <- MV.read ks s0
+        -- k1 <- MV.read ks s1
+        -- cdtList <- S.toList_ $
+        --   S.mapM (\cdt@(s0s1,(n01',_)) -> do
+        --              loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
+        --              return (loss,cdt)) $
+        --   withPB (M.size jts) (here "Computing losses (TODO: remove)") $
+        --   S.each $ M.toList jts
 
-        when (relativeError minLoss minLoss' > 1e-5
-              || notElem (s0',s1') s0s1s) $ do
-          let rLoss = Mdl.rLoss numSymbols
-              nLoss = Mdl.nLoss n k01
-              kLoss = Mdl.kLoss numSymbols n k01
-              sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
-                    | otherwise = Mdl.sLoss2 k01 k0 k1
-          naiveParts <- Mdl.naiveInfoDeltaParts mdl (s0',s1') k01'
-          error $ "loss mismatch:\nfrom map:   "
-            ++ show (minLoss, k01, head s0s1s, tail s0s1s)
-            ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
-            ++ "\nfrom naive: " ++ show (minLoss', k01', (s0',s1'))
-            ++ "\nfields:     " ++ show naiveParts
-        -- </verification>
+        -- putStrLn $ here "Sorting candidates (TODO: remove)..."
+        -- (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
+        --   [] -> error "no candidates"
+        --   (c@(loss,_):cdts') -> do
+        --     when (loss < 0) $ putStrLn $ here $
+        --                       "Intro: \n   " ++ showCdt rs c
+        --     putStrLn $ here "Next top candidates:"
+        --     forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
+        --     return c
+
+        -- when (relativeError minLoss minLoss' > 1e-5
+        --       || notElem (s0',s1') s0s1s) $ do
+        --   let rLoss = Mdl.rLoss numSymbols
+        --       nLoss = Mdl.nLoss n k01
+        --       kLoss = Mdl.kLoss numSymbols n k01
+        --       sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
+        --             | otherwise = Mdl.sLoss2 k01 k0 k1
+        --   naiveParts <- Mdl.naiveInfoDeltaParts mdl (s0',s1') k01'
+        --   error $ "loss mismatch:\nfrom map:   "
+        --     ++ show (minLoss, k01, head s0s1s, tail s0s1s)
+        --     ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
+        --     ++ "\nfrom naive: " ++ show (minLoss', k01', (s0',s1'))
+        --     ++ "\nfields:     " ++ show naiveParts
+        -- -- </verification>
 
         -- :: Print stats to CSV :: --
         hPutStrLn csvHandle $
           printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
-          (R.numSymbols rs) factor -- %d, %.4f
+          (R.numSymbols rs) -- %d
+          factor -- %.4f
           codeLen' -- %d
           mCodeLen -- %d
           rsCodeLen -- %d
