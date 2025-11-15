@@ -1,12 +1,12 @@
-{-# LANGUAGE LambdaCase, ScopedTypeVariables, TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables, TypeApplications #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Diagram (module Diagram) where
 
 import System.IO (hClose, hFileSize, hFlush, hPutStrLn, openFile, IOMode(WriteMode, ReadMode))
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName)
-import System.Environment (getArgs)
-import System.Exit (exitFailure)
+
+import Options.Applicative
 
 import Control.Monad
 
@@ -14,7 +14,7 @@ import Text.Printf (printf)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
--- import Numeric.MathFunctions.Comparison
+import Numeric.MathFunctions.Comparison (relativeError)
 
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
@@ -30,13 +30,38 @@ import Diagram.Mesh (Mesh(Mesh))
 import qualified Diagram.Mesh as Mesh
 import Diagram.Progress
 
+-- | Command-line options for the diagram program
+data Options = Options
+  { optFilename        :: !FilePath
+  , optSubsample       :: !Int
+  , optVerifyCandidate :: !Bool
+  } deriving (Show)
+
+-- | Parser for command-line options
+optionsParser :: Parser Options
+optionsParser = Options
+  <$> argument str
+      ( metavar "FILENAME"
+     <> help "Input file to process" )
+  <*> option auto
+      ( long "subsample"
+     <> metavar "VAL"
+     <> value maxBound
+     <> help "Subsample size (default: process entire file)" )
+  <*> switch
+      ( long "verify-candidate"
+     <> help "Run verification code for candidate selection" )
+
 main :: IO ()
 main = do
-  (maxStrLen, filename) <- (getArgs >>=) $ \case
-    [filename] -> return (maxBound, filename)
-    [maxLenStr, filename] -> return (read maxLenStr, filename)
-    _else -> putStrLn "Usage: diagram [SIZE] FILENAME" >>
-             exitFailure
+  opts <- execParser $ info (optionsParser <**> helper)
+    ( fullDesc
+   <> progDesc "Process FILENAME and generate compression diagram"
+   <> header "diagram - a compression analysis tool" )
+
+  let maxStrLen = optSubsample opts
+      filename = optFilename opts
+      verifyCandidate = optVerifyCandidate opts
 
   srcHandle <- openFile filename ReadMode
   srcByteLen <- hFileSize srcHandle -- number of atoms in the source
@@ -94,42 +119,48 @@ main = do
             (s0,s1) = head s0s1s -- TODO: something smarter?
         let (k01,_) = jts M.! (s0,s1)
 
-        putStrLn $ here $ showCdt rs (minLoss,((s0,s1),(k01, error "_|_")))
+        putStrLn $ here $ "INTRO: " ++
+          printf "%s + %s ==> %s (%d × s%d s%d) (%+.2f bits)"
+          (show $ R.toString rs [s0])
+          (show $ R.toString rs [s1])
+          (show $ R.toString rs [s0,s1])
+          k01 s0 s1 minLoss
 
-        -- -- <verification>
-        -- k0 <- MV.read ks s0
-        -- k1 <- MV.read ks s1
-        -- cdtList <- S.toList_ $
-        --   S.mapM (\cdt@(s0s1,(n01',_)) -> do
-        --              loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
-        --              return (loss,cdt)) $
-        --   withPB (M.size jts) (here "Computing losses (TODO: remove)") $
-        --   S.each $ M.toList jts
+        -- <verification>
+        when verifyCandidate $ do
+          k0 <- MV.read ks s0
+          k1 <- MV.read ks s1
+          cdtList <- S.toList_ $
+            S.mapM (\cdt@(s0s1,(n01',_)) -> do
+                       loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
+                       return (loss,cdt)) $
+            withPB (M.size jts) (here "Computing losses (TODO: remove)") $
+            S.each $ M.toList jts
 
-        -- putStrLn $ here "Sorting candidates (TODO: remove)..."
-        -- (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
-        --   [] -> error "no candidates"
-        --   (c@(loss,_):cdts') -> do
-        --     when (loss < 0) $ putStrLn $ here $
-        --                       "Intro: \n   " ++ showCdt rs c
-        --     putStrLn $ here "Next top candidates:"
-        --     forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
-        --     return c
+          putStrLn $ here "Sorting candidates (TODO: remove)..."
+          (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
+            [] -> error "no candidates"
+            (c@(loss,_):cdts') -> do
+              when (loss < 0) $ putStrLn $ here $
+                                "Intro: \n   " ++ showCdt rs c
+              putStrLn $ here "Next top candidates:"
+              forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
+              return c
 
-        -- when (relativeError minLoss minLoss' > 1e-5
-        --       || notElem (s0',s1') s0s1s) $ do
-        --   let rLoss = Mdl.rLoss numSymbols
-        --       nLoss = Mdl.nLoss n k01
-        --       kLoss = Mdl.kLoss numSymbols n k01
-        --       sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
-        --             | otherwise = Mdl.sLoss2 k01 k0 k1
-        --   naiveParts <- Mdl.naiveInfoDeltaParts mdl (s0',s1') k01'
-        --   error $ "loss mismatch:\nfrom map:   "
-        --     ++ show (minLoss, k01, head s0s1s, tail s0s1s)
-        --     ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
-        --     ++ "\nfrom naive: " ++ show (minLoss', k01', (s0',s1'))
-        --     ++ "\nfields:     " ++ show naiveParts
-        -- -- </verification>
+          when (relativeError minLoss minLoss' > 1e-5
+                || notElem (s0',s1') s0s1s) $ do
+            let rLoss = Mdl.rLoss numSymbols
+                nLoss = Mdl.nLoss n k01
+                kLoss = Mdl.kLoss numSymbols n k01
+                sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
+                      | otherwise = Mdl.sLoss2 k01 k0 k1
+            naiveParts <- Mdl.naiveInfoDeltaParts mdl (s0',s1') k01'
+            error $ "loss mismatch:\nfrom map:   "
+              ++ show (minLoss, k01, head s0s1s, tail s0s1s)
+              ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
+              ++ "\nfrom naive: " ++ show (minLoss', k01', (s0',s1'))
+              ++ "\nfields:     " ++ show naiveParts
+        -- </verification>
 
         -- :: Print stats to CSV :: --
         hPutStrLn csvHandle $
