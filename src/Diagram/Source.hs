@@ -84,7 +84,7 @@ splitAt rs = go
 next :: forall m r. PrimMonad m =>
         Rules -> Source m r -> m (Either r (Sym, Source m r))
 next rs (Source buf bs rsm im trie as)
-  -- -- | traceShow (bs,notAPrefix,exts) False = undefined
+  -- -- | traceShow (bs,notAPrefix,"length exts:",length exts) False = undefined
   | notAPrefix = (D.tryUncons buf >>=) $ \case -- pop a symbol
       Nothing -> error "impossible"
       Just (s,buf') -> return $ Right (s, Source buf' bs' rsm im trie as)
@@ -109,9 +109,13 @@ next rs (Source buf bs rsm im trie as)
 
     snocReduce :: Doubly (PrimState m) -> Int -> m (Doubly (PrimState m))
     snocReduce ss s1 = ( -- traceShow ("snocReduce", s1, "on") (D.traceShow ss) >>
-                        D.lastElem ss >>=) $ \case
-      Just s0 | not (null constrs) -> foldM snocReduce ss recip01
-                                      >>= flip snocReduce s01
+                         D.tryUnsnoc ss >>=) $ \case
+      Nothing -> snd <$> D.snoc ss s1
+      Just (ss',s0)
+        | null constrs -> snd <$> (D.snoc ss' s0
+                                   >>= flip D.snoc s1 . snd)
+        | otherwise -> foldM snocReduce ss' recip01
+                       >>= flip snocReduce s01
         where
           s01 = minimum constrs
           recip01 = R.lRecip rs s0 (fst $ rs R.! s01)
@@ -124,5 +128,3 @@ next rs (Source buf bs rsm im trie as)
                                       >>= nothingIf (>= suf0)) $
                     -- ...over composite suffixes of s0
                     init $ R.suffixes rs s0
-
-      _else -> snd <$> D.snoc ss s1 -- drop index

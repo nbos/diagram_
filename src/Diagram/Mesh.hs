@@ -149,6 +149,7 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
         S.scanM (\(_,l) s -> first (,s) . fromJust <$> D.trySnoc l s) -- snoc
                 (return (error "_|_", str')) return $
         withPB n01 "Filling mesh back to capacity" $
+        -- S.map traceShowId $
         S.yield s_0 >> ss
       --
 
@@ -161,7 +162,9 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
       return (observed, am', Mesh mdl'' str'' par'' jts'' bp' ls src'')
 
   -- :: delete and re-insert in loss map :: --
-  let affectedSymbols = IS.insert s0 $ IS.insert s1 observed
+  let affectedSymbols = IS.insert s0 $
+                        IS.insert s1 $
+                        IS.delete s01 observed -- delete bc using old `bp`
   affectedJoints <- -- (this could be improved but it's the simplest)
     fmap (Set.unions . (M.keysSet (M.unions [am,rm,am']):))$
     mapM (MV.read bp) $ IS.toList affectedSymbols
