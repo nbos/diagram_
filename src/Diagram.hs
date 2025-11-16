@@ -49,7 +49,7 @@ optionsParser = Options
      <> value maxBound
      <> help "Subsample size (default: process entire file)" )
   <*> switch
-      ( long "verify-candidate"
+      ( long "verify"
      <> help "Run verification code for candidate selection" )
 
 main :: IO ()
@@ -134,15 +134,15 @@ main = do
             S.mapM (\cdt@(s0s1,(n01',_)) -> do
                        loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
                        return (loss,cdt)) $
-            withPB (M.size jts) (here "Computing losses (TODO: remove)") $
+            withPB (M.size jts) (here "Computing losses (--verify)") $
             S.each $ M.toList jts
 
-          putStrLn $ here "Sorting candidates (TODO: remove)..."
+          putStrLn $ here "Sorting candidates (--verify)..."
           (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
             [] -> error "no candidates"
             (c@(loss,_):cdts') -> do
               when (loss < 0) $ putStrLn $ here $
-                                "Intro: \n   " ++ showCdt rs c
+                                "Top candidate: \n   " ++ showCdt rs c
               putStrLn $ here "Next top candidates:"
               forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
               return c

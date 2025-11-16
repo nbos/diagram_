@@ -1,15 +1,22 @@
-# Default target is debug
+# Default target is fast build
 .PHONY: default
-default: debug
+default: fast
 
-# Debug build with no optimization
+# Fast build with no optimization and no profiling
+.PHONY: fast
+fast:
+	@echo "Building fast version (no profiling, -O0)..."
+	cabal build --ghc-options="-O0"
+	@echo "Fast build complete."
+
+# Debug build with profiling for stack traces
 .PHONY: debug
 debug:
-	@echo "Building debug version..."
-	cabal build --enable-profiling --ghc-options="-O0 -prof -fprof-auto"
-	@echo "Debug build complete."
+	@echo "Building debug version with profiling..."
+	cabal build --enable-profiling --ghc-options="-O0 -fprof-auto -fprof-cafs -rtsopts"
+	@echo "Debug build complete. Run with: make run-debug"
 
-# Release build with full optimization and additional options
+# Release build with full optimization
 .PHONY: release
 release:
 	@echo "Building release version..."
@@ -23,8 +30,8 @@ clean:
 	cabal clean
 	@echo "Clean complete."
 
-# Run the program
-.PHONY: run
-run: debug
-	@echo "Running program (debug version)..."
-	cabal run diagram
+# # Run with profiling and stack traces
+# .PHONY: run-debug
+# run-debug: debug
+# 	@echo "Running program with profiling and stack traces..."
+# 	cabal run diagram -- +RTS -xc -RTS

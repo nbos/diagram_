@@ -176,8 +176,8 @@ delta (s0,s1) s01 ss@(D.Doubly (Just ihead) _ _ _ _) is0 = do
   return ((am,rm),r)
 
   where
-    prevOf = D.prev ss
-    nextOf = D.next ss
+    prevOf = D.prevKey ss
+    nextOf = D.nextKey ss
     readSym = D.read ss
 
     insertList :: [Index] -> IntSet -> IntSet
@@ -364,7 +364,7 @@ naiveRecountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
         Right (i,is') -> do
           -- prev
           unless (i == i0) $ do
-            iprev <- D.prev ss i
+            iprev <- D.prevKey ss i
             prev <- D.read ss iprev
             MV.modify prevvec (+1) prev
             when (prev == s0) $ do -- assert (s0 /= s1)
@@ -382,7 +382,7 @@ naiveRecountM ss@(D.Doubly (Just i0) _ _ _ _) (s0,s1) s01 is0 = do
           (S.next (S.drop (n-1) $ S.yield i >> is') >>=) $ \case
             Left r -> return r -- impossible?
             Right (i',is'') -> do
-              inext <- D.next ss i'
+              inext <- D.nextKey ss i'
               unless (inext == i0) $ do
                 next <- D.read ss inext
                 MV.modify nextvec (+1) next

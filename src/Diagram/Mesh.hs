@@ -8,6 +8,7 @@ import Control.Monad.Primitive (PrimMonad(PrimState))
 import Data.Word (Word8)
 import Data.Maybe
 import Data.Bifunctor
+-- import qualified Data.IntMap.Strict as IM
 import qualified Data.Map.Strict as M
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -18,6 +19,7 @@ import qualified Streaming as S
 import qualified Streaming.Prelude as S
 
 import qualified Data.Vector.Strict as B
+-- import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 
 import Diagram.Rules (Sym)
@@ -129,7 +131,7 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
     Left src'' -> return ( IS.empty, M.empty
                          , Mesh mdl' str' par' jts' bp' ls src'')
     Right (s_0,ss) -> do
-      i_n' <- fromMaybe (error "empty Mesh") <$> D.last str'
+      i_n' <- fromMaybe (error "empty Mesh") <$> D.lastKey str'
       ns' <- D.read str' i_n'
 
       -- in one pass
@@ -186,5 +188,31 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
           S.foldM_ deleteLoss (return ls') return $
           withPB (M.size lossesToDelete) "Deleting losses" $
           S.each $ M.toList lossesToDelete
+
+  -- -- <verification>
+  -- let Model rs'' n'' _ = mdl''
+  -- (Model _ nVerif ksVerif, _) <- Mdl.fromStream rs'' $ D.stream str''
+  -- unless (n'' == nVerif) $
+  --   error $ "Error in the maintenance of symbol count: " ++ show n''
+  --   ++ " should be " ++ show nVerif
+
+  -- ksEq <- liftA2 (==) (U.freeze ks'') (U.freeze ksVerif)
+  -- unless ksEq $ do
+  --   v0 <- U.freeze ks''
+  --   v1 <- U.freeze ksVerif
+  --   error $ "Error in the maintenance of counts vector:\n" ++ show v0
+  --     ++ "\nShould be:\n" ++ show v1
+
+  -- lsVerif <- Joints.byLoss ks'' =<< Joints.fromDoubly str''
+  -- unless (ls'' == lsVerif) $
+  --   let common = IM.keysSet $
+  --                IM.mapMaybe id $
+  --                IM.intersectionWith (\v0 v1 -> if v0 == v1 then Just v0 else Nothing)
+  --                ls'' lsVerif
+  --   in error $ "Error in the maintenance of loss map. Contains:\n"
+  --      ++ show (ls'' `IM.withoutKeys` common)
+  --      ++ "\nShould contain:\n" ++ show (lsVerif `IM.withoutKeys` common)
+
+  -- -- </verification>
 
   return (s01, Mesh mdl'' str'' par'' jts'' bp'' ls'' src'')

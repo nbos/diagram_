@@ -57,7 +57,8 @@ new rs as = do
 pushRule :: PrimMonad m => (Sym, Sym) -> Sym -> Source m r -> m (Source m r)
 pushRule s0s1 s01 (Source buf bs rsm im trie as) = do
   buf' <- S.foldM_ (D.subst2 s01) (return buf) return $
-          D.jointIndices buf s0s1
+          D.streamKeysOfJoint buf s0s1
+  -- (traceShow ("pushed",s0s1,s01) $ traceShowId rsm')
   return $ Source buf' bs rsm' im' trie' as
   where
     rsm' = M.insert s0s1 s01 rsm
@@ -83,6 +84,7 @@ splitAt rs = go
 next :: forall m r. PrimMonad m =>
         Rules -> Source m r -> m (Either r (Sym, Source m r))
 next rs (Source buf bs rsm im trie as)
+  -- -- | traceShow (bs,notAPrefix,exts) False = undefined
   | notAPrefix = (D.tryUncons buf >>=) $ \case -- pop a symbol
       Nothing -> error "impossible"
       Just (s,buf') -> return $ Right (s, Source buf' bs' rsm im trie as)
@@ -102,10 +104,12 @@ next rs (Source buf bs rsm im trie as)
 
   where
     exts = Trie.keys $ Trie.submap bs trie
-    notAPrefix = null exts || exts == [bs]
+    notAPrefix = not (BS.null bs) -- short circuit in case exts not lazy
+                 && (null exts || exts == [bs])
 
     snocReduce :: Doubly (PrimState m) -> Int -> m (Doubly (PrimState m))
-    snocReduce ss s1 = (D.last ss >>=) $ \case
+    snocReduce ss s1 = ( -- traceShow ("snocReduce", s1, "on") (D.traceShow ss) >>
+                        D.lastElem ss >>=) $ \case
       Just s0 | not (null constrs) -> foldM snocReduce ss recip01
                                       >>= flip snocReduce s01
         where

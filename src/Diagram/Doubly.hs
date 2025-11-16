@@ -3,6 +3,7 @@
 module Diagram.Doubly (module Diagram.Doubly) where
 
 import Prelude hiding (read)
+import qualified Debug.Trace as Trace
 
 import Control.Monad
 import Control.Monad.Primitive (PrimMonad(PrimState))
@@ -51,6 +52,10 @@ checkIntegrity l@(Doubly _ free elems _ _) r = do
 
   where err = error . (++) "Doubly.checkIntegrity: "
 
+-- | Monadic traceShow of the list
+traceShow :: (Show a, PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m ()
+traceShow l = toList l >>= flip Trace.traceShow (return ())
+
 -- | Allocate a new list of the given size with undefined values
 new :: (PrimMonad m, MVector v a) => Int -> m (Doubly v (PrimState m) a)
 new sz = do
@@ -69,20 +74,26 @@ full :: Doubly v s a -> Bool
 full (Doubly _ [] _ _ _) = True
 full _ = False
 
-head :: Doubly v s a -> Maybe Index
-head (Doubly mi0 _ _ _ _) = mi0
+headKey :: Doubly v s a -> Maybe Index
+headKey (Doubly mi0 _ _ _ _) = mi0
 
-last :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe Index)
-last (Doubly Nothing _ _ _ _) = return Nothing
-last (Doubly (Just i0) _ _ prevs _) = Just <$> MV.read prevs i0
+lastKey :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe Index)
+lastKey (Doubly Nothing _ _ _ _) = return Nothing
+lastKey (Doubly (Just i0) _ _ prevs _) = Just <$> MV.read prevs i0
 
+lastElem :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe a)
+lastElem l = lastKey l >>= mapM (read l)
+
+-- | Synonym for @read@
 (!) :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> m a
 (!) (Doubly _ _ elems _ _) = MV.read elems
 infixl 9 !
 
+-- | Read an index into an elem
 read :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> m a
 read (Doubly _ _ elems _ _) = MV.read elems
 
+-- | Write at a given index the given elem
 write :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> Index -> a -> m ()
 write (Doubly _ _ elems _ _) = MV.write elems
 
@@ -137,15 +148,15 @@ toList = S.toList_ . stream
 
 -- | Return the index of the element preceeding the element at a given
 -- index in the list
-prev :: (PrimMonad m, MVector v a) =>
-        Doubly v (PrimState m) a -> Index -> m Index
-prev (Doubly _ _ _ prevs _) = MV.read prevs
+prevKey :: (PrimMonad m, MVector v a) =>
+           Doubly v (PrimState m) a -> Index -> m Index
+prevKey (Doubly _ _ _ prevs _) = MV.read prevs
 
 -- | Return the index of the element following the element at a given
 -- index in the list
-next :: (PrimMonad m, MVector v a) =>
-        Doubly v (PrimState m) a -> Index -> m Index
-next (Doubly _ _ _ _ nexts) = MV.read nexts
+nextKey :: (PrimMonad m, MVector v a) =>
+           Doubly v (PrimState m) a -> Index -> m Index
+nextKey (Doubly _ _ _ _ nexts) = MV.read nexts
 
 -- | Modify an element at a given index. Throws an error if index is
 -- undefined
@@ -167,10 +178,10 @@ delete (Doubly mi0@(Just i0) free elems prevs nexts) i = do
              | otherwise  = mi0
     return $ Doubly mi0' (i:free) elems prevs nexts
 
-elemIndices :: (PrimMonad m, MVector v a, Eq a) =>
-               Doubly v (PrimState m) a -> a -> Stream (Of Index) m ()
-elemIndices (Doubly Nothing _ _ _ _) _ = return ()
-elemIndices (Doubly (Just i0) _ elems _ nexts) a = go i0
+streamKeysOf :: (PrimMonad m, MVector v a, Eq a) =>
+                Doubly v (PrimState m) a -> a -> Stream (Of Index) m ()
+streamKeysOf (Doubly Nothing _ _ _ _) _ = return ()
+streamKeysOf (Doubly (Just i0) _ elems _ nexts) a = go i0
   where
     go i = do
       a' <- lift $ MV.read elems i
@@ -178,10 +189,10 @@ elemIndices (Doubly (Just i0) _ elems _ nexts) a = go i0
       nxt <- lift $ MV.read nexts i
       when (nxt /= i0) $ go nxt
 
-jointIndices :: (PrimMonad m, MVector v a, Eq a) =>
-                Doubly v (PrimState m) a -> (a,a) -> Stream (Of Index) m ()
-jointIndices (Doubly Nothing _ _ _ _) _ = return ()
-jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
+streamKeysOfJoint :: (PrimMonad m, MVector v a, Eq a) =>
+                     Doubly v (PrimState m) a -> (a,a) -> Stream (Of Index) m ()
+streamKeysOfJoint (Doubly Nothing _ _ _ _) _ = return ()
+streamKeysOfJoint (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
   where
     go i = do
       a <- lift $ MV.read elems i
@@ -201,7 +212,7 @@ jointIndices (Doubly (Just i0) _ elems _ nexts) (a0,a1) = go i0
 subst2 :: (PrimMonad m, MVector v a) => a -> Doubly v (PrimState m) a ->
           Index -> m (Doubly v (PrimState m) a)
 subst2 s01 l i = modify l (const s01) i
-                 >> next l i >>= delete l
+                 >> nextKey l i >>= delete l
 
 -- | Append an element at the begining of the list. Grows the structure
 -- in case there are no free spaces.
@@ -285,7 +296,7 @@ tryUncons l@(Doubly (Just i0) _ _ _ _) = do a <- read l i0
 tryUnsnoc :: (PrimMonad m, MVector v a) =>
              Doubly v (PrimState m) a -> m (Maybe (Doubly v (PrimState m) a, a))
 tryUnsnoc (Doubly Nothing _ _ _ _) = return Nothing
-tryUnsnoc l@(Doubly (Just i0) _ _ _ _) = do i <- prev l i0
+tryUnsnoc l@(Doubly (Just i0) _ _ _ _) = do i <- prevKey l i0
                                             a <- read l i
                                             l' <- delete l i
                                             return $ Just (l',a)
