@@ -32,9 +32,10 @@ import Diagram.Progress
 
 -- | Command-line options for the diagram program
 data Options = Options
-  { optFilename        :: !FilePath
-  , optSubsample       :: !Int
-  , optVerifyCandidate :: !Bool
+  { optFilename         :: !FilePath
+  , optSubsample        :: !Int
+  , optVerifyMinLoss    :: !Bool
+  , optVerifyStringMeta :: !Bool
   } deriving (Show)
 
 -- | Parser for command-line options
@@ -49,8 +50,11 @@ optionsParser = Options
      <> value maxBound
      <> help "Subsample size (default: process entire file)" )
   <*> switch
-      ( long "verify"
-     <> help "Run verification code for candidate selection" )
+      ( long "verify-min-loss"
+     <> help "Verify top candidate has min loss by computing all losses" )
+  <*> switch
+      ( long "verify-string-meta"
+     <> help "Verify length, counts & joint counts of working string" )
 
 main :: IO ()
 main = do
@@ -61,7 +65,8 @@ main = do
 
   let maxStrLen = optSubsample opts
       filename = optFilename opts
-      verifyCandidate = optVerifyCandidate opts
+      verifyMinLoss = optVerifyMinLoss opts
+      verifyStringMeta = optVerifyStringMeta opts
 
   srcHandle <- openFile filename ReadMode
   srcByteLen <- hFileSize srcHandle -- number of atoms in the source
@@ -127,17 +132,17 @@ main = do
           k01 s0 s1 minLoss
 
         -- <verification>
-        when verifyCandidate $ do
+        when verifyMinLoss $ do
           k0 <- MV.read ks s0
           k1 <- MV.read ks s1
           cdtList <- S.toList_ $
             S.mapM (\cdt@(s0s1,(n01',_)) -> do
                        loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
                        return (loss,cdt)) $
-            withPB (M.size jts) (here "Computing losses (--verify)") $
+            withPB (M.size jts) (here "Evaluating all losses (--verify-min-loss)") $
             S.each $ M.toList jts
 
-          putStrLn $ here "Sorting candidates (--verify)..."
+          putStrLn $ here "Sorting joints by loss (--verify-min-loss)..."
           (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
             [] -> error "no candidates"
             (c@(loss,_):cdts') -> do
@@ -184,7 +189,8 @@ main = do
           then putStrLn (here "Reached minimum. Terminating.")
                >> hClose csvHandle -- end
           else let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
-               in Mesh.pushRule msh (s0,s1) >>= go codeLen' sls' . snd -- continue
+               in Mesh.pushRule verifyStringMeta msh (s0,s1)
+                  >>= go codeLen' sls' . snd -- continue
   -- </main loop>
 
   where
