@@ -84,7 +84,7 @@ main = do
     _ -> go codeLen0 sls0 msh0 -- go
 
       where
-      go codeLen sls msh@(Mesh mdl@(Model rs n ks) _ _ jts _ ls _) = do
+      go codeLen sls msh@(Mesh mdl@(Model rs n ks) _ jts _ ls _) = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 

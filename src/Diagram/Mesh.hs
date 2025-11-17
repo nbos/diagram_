@@ -42,21 +42,23 @@ import Diagram.Util
 data Mesh m r = Mesh {
   model :: !(Model (PrimState m)),   -- ^ String's model :: (rs,n,ks)
   string :: !(Doubly (PrimState m)), -- ^ Fixed size underlying string
-  parity :: !Bool,                   -- ^ Number of times last symbol is repeated
   candidates :: !Joints,             -- ^ Joint counts + locations
   byPart :: !(B.MVector (PrimState m)
-               (Set (Sym,Sym))),     -- ^ Joints each symbol is part of
+              (Set (Sym,Sym))),     -- ^ Joints each symbol is part of
   losses :: !ByLoss,                 -- ^ Joints by their count/loss
   source :: !(Source m r)            -- ^ Source of raw bytes
 }
 
 full :: Mesh m r -> Bool
-full (Mesh _ str _ _ _ _ _) = D.full str
+full (Mesh _ str _ _ _ _) = D.full str
 
+-- | Returns the parity at the end of the string in the form of a Bool:
+-- True :: Odd, False :: Even.
 checkParity :: PrimMonad m => Doubly (PrimState m) -> m Bool
 checkParity str = (S.next (D.revStream str) >>=) $ \case
-  Left () -> return False
-  Right (sn, revRest) -> even <$> S.length_ (S.takeWhile (== sn) revRest)
+  Left () -> return False -- 0 :: Even :: False
+  Right (sn, revRest) -> even <$> -- True if rest of string of sn's is even
+    S.length_ (S.takeWhile (== sn) revRest)
 
 -- | Construction with size `n` from a stream of atoms
 fromStream :: (PrimMonad m, MonadIO m) =>
@@ -71,12 +73,6 @@ fromStream n as = do
                             withPB n "Initializing mesh" $
                             S.splitAt n as
 
-  -- check parity of end of `str`
-  par <- (S.next (D.revStream str) >>=) $ \case
-    Left () -> return False
-    Right (sn, revRest) ->
-      even <$> S.length_ (S.takeWhile (== sn) revRest)
-
   bp <- MV.replicate (R.numSymbols rs) Set.empty
   forM_ (M.keys jts) $ \(s0,s1) -> do
     MV.modify bp (Set.insert (s0,s1)) s0
@@ -85,16 +81,16 @@ fromStream n as = do
   let Model _ _ mks = mdl
   ls <- Joints.byLoss mks jts
 
-  Mesh mdl str par jts bp ls <$> Source.new rs rest
+  Mesh mdl str jts bp ls <$> Source.new rs rest
 
 minLoss :: Mesh m r -> (Double, [(Sym,Sym)])
-minLoss (Mesh (Model rs n _) _ _ _ _ ls _) = Joints.findMin numSymbols n ls
+minLoss (Mesh (Model rs n _) _ _ _ ls _) = Joints.findMin numSymbols n ls
   where numSymbols = R.numSymbols rs
 
 -- | Add a rule, rewrite, refill, with progress bars
 pushRule :: (PrimMonad m, MonadIO m) =>
             Mesh m r -> (Sym,Sym) -> m (Sym, Mesh m r)
-pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
+pushRule (Mesh mdl@(Model _ _ ks) str jts bp ls src) (s0,s1) = do
   let (n01, i01s) = second IS.toList $
                     fromMaybe (error $ "not a candidate: " ++ show (s0,s1)) $
                     M.lookup (s0,s1) jts
@@ -122,25 +118,26 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
   str' <- S.foldM_ (D.subst2 s01) (return str) return $
           withPB n01 (here "Modifying string in place") $
           S.each i01s
-  par' <- checkParity str'
   src' <- Source.pushRule (s0,s1) s01 src
 
   -- :: fill mesh with new symbols :: --
-  (observed, am', Mesh mdl'' str'' par'' jts'' bp'' ls' src'') <-
+  (observed, am', Mesh mdl'' str'' jts'' bp'' ls' src'') <-
     (S.next (Source.splitAt rs' n01 src') >>=) $ \case
     Left src'' -> return ( IS.empty, M.empty
-                         , Mesh mdl' str' par' jts' bp' ls src'')
+                         , Mesh mdl' str' jts' bp' ls src'')
     Right (s_0,ss) -> do
       i_n' <- fromMaybe (error "empty Mesh") <$> D.lastKey str'
-      ns' <- D.read str' i_n'
+      s_n' <- D.read str' i_n'
+      par' <- checkParity str'
 
       -- in one pass
       (observed :> (mdl'' :> (am', str'' :> src''))) <-
         S.fold (flip IS.insert) IS.empty id $ -- record inc'd symbols
         S.foldM Mdl.incCount (return mdl') return $ S.copy $ -- inc Model counts
         S.map snd $ -- now, only for the Sym, dropping Index
-        ( if par' then Joints.fromStreamOdd_ (i_n',ns') -- odd
-          else Joints.fromStream_ ) M.empty $ S.copy $  -- even
+        ( if par' || s_0 /= s_n'
+          then Joints.fromStreamOdd_ (i_n',s_n') -- odd or different
+          else Joints.fromStream_ ) M.empty $ S.copy $  -- even and same
         S.map fst $ -- drop every intermediate (Doubly m), keep (Index,Sym)
         fmap (S.first $ snd -- we only need the last (Doubly m), drop (Index,Sym)
                . fromJust) $ -- assume there is a last element
@@ -153,13 +150,12 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
         S.yield s_0 >> ss
       --
 
-      par'' <- checkParity str''
       forM_ (M.keys $ am' `M.difference` jts') $ \jt -> do
         MV.modify bp' (Set.insert jt) $ fst jt
         MV.modify bp' (Set.insert jt) $ snd jt
 
       let jts'' = jts' `Joints.union` am'
-      return (observed, am', Mesh mdl'' str'' par'' jts'' bp' ls src'')
+      return (observed, am', Mesh mdl'' str'' jts'' bp' ls src'')
 
   -- :: delete and re-insert in loss map :: --
   let affectedSymbols = IS.insert s0 $
@@ -215,7 +211,6 @@ pushRule (Mesh mdl@(Model _ _ ks) str _ jts bp ls src) (s0,s1) = do
   --   in error $ "Error in the maintenance of loss map. Contains:\n"
   --      ++ show (ls'' `IM.withoutKeys` common)
   --      ++ "\nShould contain:\n" ++ show (lsVerif `IM.withoutKeys` common)
-
   -- -- </verification>
 
-  return (s01, Mesh mdl'' str'' par'' jts'' bp'' ls'' src'')
+  return (s01, Mesh mdl'' str'' jts'' bp'' ls'' src'')
