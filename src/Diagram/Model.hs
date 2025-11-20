@@ -47,6 +47,11 @@ incCount :: PrimMonad m =>
 incCount (Model rs n ks) s = MV.modify ks (+1) s
                              >> return (Model rs (n+1) ks)
 
+decCount :: PrimMonad m =>
+            Model (PrimState m) -> Sym -> m (Model (PrimState m))
+decCount (Model rs n ks) s = MV.modify ks (+(-1)) s
+                             >> return (Model rs (n-1) ks)
+
 -- | Reconstruction from rule set and fully constructed symbol string
 fromList :: PrimMonad m => Rules -> [Sym] -> m (Model (PrimState m))
 fromList rs ss = do

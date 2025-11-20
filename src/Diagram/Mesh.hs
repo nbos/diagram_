@@ -203,6 +203,7 @@ pushRule verify (Mesh mdl@(Model _ _ ks) str jts bp ls src) (s0,s1) = do
       error $ "Error in the maintenance of counts vector:\n" ++ show v0
         ++ "\nShould be:\n" ++ show v1
 
+    -- TODO: add custom progress message?
     lsVerif <- Joints.byLoss ks'' =<< Joints.fromDoubly str''
     unless (ls'' == lsVerif) $
       let common = IM.keysSet $

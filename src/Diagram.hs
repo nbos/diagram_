@@ -5,12 +5,14 @@ module Diagram (module Diagram) where
 import System.IO (hClose, hFileSize, hFlush, hPutStrLn, openFile, IOMode(WriteMode, ReadMode))
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeBaseName)
+import System.Exit (exitSuccess)
 
 import Options.Applicative
 
 import Control.Monad
 
 import Text.Printf (printf)
+import Data.Maybe
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
@@ -33,7 +35,7 @@ import Diagram.Progress
 -- | Command-line options for the diagram program
 data Options = Options
   { optFilename         :: !FilePath
-  , optSubsample        :: !Int
+  , optSubsample        :: !(Maybe Int)
   , optVerifyMinLoss    :: !Bool
   , optVerifyStringMeta :: !Bool
   } deriving (Show)
@@ -44,14 +46,13 @@ optionsParser = Options
   <$> argument str
       ( metavar "FILENAME"
      <> help "Input file to process" )
-  <*> option auto
+  <*> optional (option auto
       ( long "subsample"
      <> metavar "VAL"
-     <> value maxBound
-     <> help "Subsample size (default: process entire file)" )
+     <> help "Subsample size (default: process entire file)" ))
   <*> switch
       ( long "verify-min-loss"
-     <> help "Verify top candidate has min loss by computing all losses" )
+     <> help "Verify top candidate has min loss" )
   <*> switch
       ( long "verify-string-meta"
      <> help "Verify length, counts & joint counts of working string" )
@@ -63,7 +64,7 @@ main = do
    <> progDesc "Process FILENAME and generate compression diagram"
    <> header "diagram - a compression analysis tool" )
 
-  let maxStrLen = optSubsample opts
+  let maxStrLen = fromMaybe maxBound (optSubsample opts)
       filename = optFilename opts
       verifyMinLoss = optVerifyMinLoss opts
       verifyStringMeta = optVerifyStringMeta opts
@@ -79,37 +80,34 @@ main = do
   csvHandle <- openFile logFilePath WriteMode
 
   let strLen = min maxStrLen $ fromInteger srcByteLen
-      codeLen0 = strLen * 8
+      -- codeLen0 = strLen * 8
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
   msh0 <- Mesh.fromStream strLen $
           join $ withPB strLen "Initializing mesh" $ S.splitAt maxStrLen $
           Q.unpack $ Q.fromHandle srcHandle
   -- <main loop>
   case () of
-    _ -> go codeLen0 sls0 msh0 -- go
+    _ -> go sls0 msh0 -- go
 
       where
-      go codeLen sls msh@(Mesh mdl@(Model rs n ks) _ jts _ ls _) = do
+      go sls msh@(Mesh mdl@(Model rs n ks) _ jts _ ls _) = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 
         -- :: Print stats to STDOUT :: -
         meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks -- O(m)
-        (mCodeLen, rsCodeLen, nCodeLen
-          , ksCodeLen, ssCodeLen) <- Mdl.codeLenParts mdl
-        let codeLen' = mCodeLen + rsCodeLen + nCodeLen + ksCodeLen + ssCodeLen
-            ratio = fromIntegral codeLen'
+        (mCodeLen, rsCodeLen, nCodeLen, ksCodeLen, ssCodeLen) <- Mdl.codeLenParts mdl
+        let codeLen = mCodeLen + rsCodeLen + nCodeLen + ksCodeLen + ssCodeLen
+            ratio = fromIntegral codeLen
                     / fromIntegral (meshByteLen * 8) :: Double
             factor = recip ratio
             srcCoverage = fromIntegral meshByteLen
                           / fromIntegral srcByteLen :: Double
         putStrLn ""
-        putStrLn $ here $ printf "LEN CHANGE: %s bits" $
-          commaize (codeLen' - codeLen)
         putStrLn $ here $
           printf ("LEN: %s bits (%s + %s + %s + %s + %s), %.2f%% of orig., "
                   ++ "factor: %.4f, over %.2f%% of input")
-          (commaize codeLen')
+          (commaize codeLen)
           (commaize mCodeLen)
           (commaize rsCodeLen)
           (commaize nCodeLen)
@@ -130,6 +128,19 @@ main = do
           (show $ R.toString rs [s1])
           (show $ R.toString rs [s0,s1])
           k01 s0 s1 minLoss
+
+        -- :: Print stats to CSV :: --
+        hPutStrLn csvHandle $
+          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
+          (R.numSymbols rs) -- %d
+          factor -- %.4f
+          codeLen -- %d
+          mCodeLen rsCodeLen nCodeLen ksCodeLen ssCodeLen -- %d %d %d %d %d
+          s0 s1 k01 minLoss -- %d, %d, %d, %f
+          (R.toEscapedString rs [s0])
+          (R.toEscapedString rs [s1])
+          (R.toEscapedString rs [s0,s1])
+        hFlush csvHandle
 
         -- <verification>
         when verifyMinLoss $ do
@@ -167,30 +178,26 @@ main = do
               ++ "\nfields:     " ++ show naiveParts
         -- </verification>
 
-        -- :: Print stats to CSV :: --
-        hPutStrLn csvHandle $
-          printf "%d, %.4f, %d, %d, %d, %d, %d, %d, %d, %d, %d, %.2f, %s, %s, %s"
-          (R.numSymbols rs) -- %d
-          factor -- %.4f
-          codeLen' -- %d
-          mCodeLen -- %d
-          rsCodeLen -- %d
-          nCodeLen -- %d
-          ksCodeLen -- %d
-          ssCodeLen -- %d
-          s0 s1 k01 minLoss -- %d, %d, %d, %f
-          (R.toEscapedString rs [s0])
-          (R.toEscapedString rs [s1])
-          (R.toEscapedString rs [s0,s1])
-        hFlush csvHandle
-
         -- [EXIT]
-        if minLoss > 0
-          then putStrLn (here "Reached minimum. Terminating.")
-               >> hClose csvHandle -- end
-          else let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
-               in Mesh.pushRule verifyStringMeta msh (s0,s1)
-                  >>= go codeLen' sls' . snd -- continue
+        when (minLoss > 0) $
+          putStrLn (here "Reached minimum. Terminating.")
+          >> hClose csvHandle
+          >> exitSuccess
+
+        (_, mdl') <- Mdl.pushRule mdl (s0,s1) k01 -- clones
+        codeLen' <- Mdl.codeLen mdl'
+
+        let lenChange = codeLen' - codeLen
+            lenChangeStr = case compare lenChange 0 of
+              GT ->  "\ESC[31m+" ++ commaize lenChange ++ "\ESC[0m" -- red
+              LT -> "\ESC[32m" ++ commaize lenChange ++ "\ESC[0m"   -- green
+              EQ -> commaize lenChange                              -- white
+        putStrLn $ here $ printf "LEN CHANGE: %s bits" lenChangeStr
+
+        let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
+        (_, msh') <- Mesh.pushRule verifyStringMeta msh (s0,s1)
+        go sls' msh' -- continue
+
   -- </main loop>
 
   where
