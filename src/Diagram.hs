@@ -1,5 +1,6 @@
-{-# LANGUAGE ScopedTypeVariables, TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables, TypeApplications, LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+
 module Diagram (module Diagram) where
 
 import System.IO (hClose, hFileSize, hFlush, hPutStrLn, openFile, IOMode(WriteMode, ReadMode))
@@ -21,6 +22,7 @@ import Numeric.MathFunctions.Comparison (relativeError)
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 
+import Streaming
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
@@ -30,11 +32,12 @@ import qualified Diagram.Model as Mdl
 import qualified Diagram.Joints as Joints
 import Diagram.Mesh (Mesh(Mesh))
 import qualified Diagram.Mesh as Mesh
-import Diagram.Progress
+import Diagram.Progress (withPB)
 
 -- | Command-line options for the diagram program
 data Options = Options
   { optFilename         :: !FilePath
+  , optEval             :: !(Maybe FilePath)
   , optSubsample        :: !(Maybe Int)
   , optVerifyMinLoss    :: !Bool
   , optVerifyStringMeta :: !Bool
@@ -44,25 +47,28 @@ data Options = Options
 optionsParser :: Parser Options
 optionsParser = Options
   <$> argument str
-      ( metavar "FILENAME"
-     <> help "Input file to process" )
-  <*> optional (option auto
-      ( long "subsample"
-     <> metavar "VAL"
-     <> help "Subsample size (default: process entire file)" ))
+  ( metavar "FILENAME"
+    <> help "Training data" )
+  <*> optional
+  (option str
+    ( long "eval"
+      <> metavar "FILENAME"
+      <> help "String to evaluate (default: same as train)" ))
+  <*> optional
+  (option auto
+    ( long "subsample"
+      <> metavar "VAL"
+      <> help "Subsample size (default: process entire file)" ))
   <*> switch
-      ( long "verify-min-loss"
-     <> help "Verify top candidate has min loss" )
+  ( long "verify-min-loss"
+    <> help "Verify top candidate has min loss" )
   <*> switch
-      ( long "verify-string-meta"
-     <> help "Verify length, counts & joint counts of working string" )
+  ( long "verify-string-meta"
+     <> help "Verify train length, counts & joint counts" )
 
 main :: IO ()
 main = do
-  opts <- execParser $ info (optionsParser <**> helper)
-    ( fullDesc
-   <> progDesc "Process FILENAME and generate compression diagram"
-   <> header "diagram - a compression analysis tool" )
+  opts <- execParser $ info (optionsParser <**> helper) fullDesc
 
   let maxStrLen = fromMaybe maxBound (optSubsample opts)
       filename = optFilename opts
@@ -85,36 +91,52 @@ main = do
   msh0 <- Mesh.fromStream strLen $
           join $ withPB strLen "Initializing mesh" $ S.splitAt maxStrLen $
           Q.unpack $ Q.fromHandle srcHandle
+
+  (evalLen0, meval0) <- case optEval opts of
+    Nothing -> return (0, Nothing)
+    Just evalFilename -> do
+      evalHandle <- openFile evalFilename ReadMode
+      evalLen <- fromInteger @Int <$> hFileSize evalHandle
+      (evalMdl0, eval0 :> ()) <- Mdl.fromStream R.empty $
+                                 S.toList $
+                                 S.copy $ S.map fromEnum $
+                                 withPB evalLen "Initializing EVAL model" $
+                                 Q.unpack $ Q.fromHandle evalHandle
+      return (evalLen, Just (evalMdl0, eval0))
+
   -- <main loop>
   case () of
-    _ -> go sls0 msh0 -- go
+    _ -> go sls0 msh0 meval0 -- go
 
       where
-      go sls msh@(Mesh mdl@(Model rs n ks) _ jts _ ls _) = do
+      go sls msh@(Mesh mdl@(Model rs n ks) _ jts _ ls _) meval = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 
         -- :: Print stats to STDOUT :: -
-        meshByteLen <- MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks -- O(m)
-        (mCodeLen, rsCodeLen, nCodeLen, ksCodeLen, ssCodeLen) <- Mdl.codeLenParts mdl
-        let codeLen = mCodeLen + rsCodeLen + nCodeLen + ksCodeLen + ssCodeLen
-            ratio = fromIntegral codeLen
-                    / fromIntegral (meshByteLen * 8) :: Double
-            factor = recip ratio
+        meshByteLen <- -- TODO: something smarter than O(m) every cycle
+          MV.ifoldl' (\acc i k -> acc + k * (sls U.! i)) 0 ks
+        (mCodeLen, rsCodeLen, nCodeLen, ksCodeLen, ssCodeLen) <-
+          Mdl.codeLenParts mdl
+
+        let trainCodeLen = mCodeLen + rsCodeLen + nCodeLen + ksCodeLen + ssCodeLen
+            trainRatio = fromIntegral trainCodeLen
+                         / fromIntegral (meshByteLen * 8) :: Double
+            trainFactor = recip trainRatio
             srcCoverage = fromIntegral meshByteLen
                           / fromIntegral srcByteLen :: Double
         putStrLn ""
         putStrLn $ here $
-          printf ("LEN: %s bits (%s + %s + %s + %s + %s), %.2f%% of orig., "
+          printf ("TRAIN LEN: %s bits (%s + %s + %s + %s + %s), %.2f%% of orig., "
                   ++ "factor: %.4f, over %.2f%% of input")
-          (commaize codeLen)
-          (commaize mCodeLen)
-          (commaize rsCodeLen)
-          (commaize nCodeLen)
-          (commaize ksCodeLen)
-          (commaize ssCodeLen)
-          (ratio * 100)
-          factor
+          (commaize trainCodeLen)
+          (commaize mCodeLen)  -- (train)
+          (commaize rsCodeLen) -- (train)
+          (commaize nCodeLen)  -- (train)
+          (commaize ksCodeLen) -- (train)
+          (commaize ssCodeLen) -- (train)
+          (trainRatio * 100)
+          trainFactor
           (100 * srcCoverage)
 
         -- :: Find next rule :: --
@@ -128,6 +150,26 @@ main = do
           (show $ R.toString rs [s1])
           (show $ R.toString rs [s0,s1])
           k01 s0 s1 minLoss
+
+        -- :: Maybe Eval :: --
+        (factor, codeLen, meval') <- case meval of
+          Nothing -> return (trainFactor, trainCodeLen, Nothing)
+          Just (evalMdl@(Model _ en _), evalStr) -> do
+            -- : stats :
+            evalCodeLen <- Mdl.codeLen evalMdl
+            let evalRatio = fromIntegral evalCodeLen
+                            / fromIntegral (evalLen0 * 8) :: Double
+                evalFactor = recip evalRatio
+            -- : push rule :
+            en' :> evalStr' :> () <-
+              S.length $ S.toList $ S.copy $
+              subst1M (s0,s1) numSymbols $
+              withPB en "Substituting in EVAL" $
+              S.each evalStr
+            let ek01 = en - en'
+            (_, evalMdl') <- Mdl.pushRule evalMdl (s0,s1) ek01
+
+            return (evalFactor, evalCodeLen, Just (evalMdl', evalStr'))
 
         -- :: Print stats to CSV :: --
         hPutStrLn csvHandle $
@@ -163,6 +205,9 @@ main = do
               forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
               return c
 
+          -- TODO: relax this condition: sometimes the head candidate is
+          -- not the one with the minLoss because +/- relative error
+          -- pushes it a bit back
           when (relativeError minLoss minLoss' > 1e-5
                 || notElem (s0',s1') s0s1s) $ do
             let rLoss = Mdl.rLoss numSymbols
@@ -187,16 +232,16 @@ main = do
         (_, mdl') <- Mdl.pushRule mdl (s0,s1) k01 -- clones
         codeLen' <- Mdl.codeLen mdl'
 
-        let lenChange = codeLen' - codeLen
+        let lenChange = codeLen' - trainCodeLen
             lenChangeStr = case compare lenChange 0 of
-              GT ->  "\ESC[31m+" ++ commaize lenChange ++ "\ESC[0m" -- red
-              LT -> "\ESC[32m" ++ commaize lenChange ++ "\ESC[0m"   -- green
-              EQ -> commaize lenChange                              -- white
-        putStrLn $ here $ printf "LEN CHANGE: %s bits" lenChangeStr
+              GT -> "\ESC[31m+" ++ commaize lenChange ++ "\ESC[0m" -- red
+              LT -> "\ESC[32m" ++ commaize lenChange ++ "\ESC[0m"  -- green
+              EQ -> commaize lenChange                             -- white
+        putStrLn $ here $ printf "TRAIN LEN CHANGE: %s bits" lenChangeStr
 
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
         (_, msh') <- Mesh.pushRule verifyStringMeta msh (s0,s1)
-        go sls' msh' -- continue
+        go sls' msh' meval' -- continue
 
   -- </main loop>
 
@@ -206,6 +251,34 @@ main = do
       (show $ R.toString rs [s0])
       (show $ R.toString rs [s1])
       (show $ R.toString rs [s0,s1])
+
+-- | Substitute a single pair of symbols for a constructed joint symbol
+-- in a string of symbols
+subst1 :: (Int,Int) -> Int -> [Int] -> [Int]
+subst1 (s0,s1) s01 = go
+  where
+    go [] = []
+    go [s] = [s]
+    go (s:s':ss) | s == s0 && s' == s1 = s01:go ss
+                 | otherwise = s:go (s':ss)
+
+-- | Monadic single construction rule substitution using Streams
+subst1M :: forall m r. Monad m => (Int, Int) -> Int ->
+          Stream (Of Int) m r -> Stream (Of Int) m r
+subst1M (s0,s1) s01 = go
+  where
+    go :: Stream (Of Int) m r -> Stream (Of Int) m r
+    go ss = (lift (S.next ss) >>=) $ \case
+      Left r -> return r
+      Right (s,ss') -> goCons s ss'
+
+    goCons s ss
+      | s == s0 = (lift (S.next ss) >>=) $ \case
+          Left r -> S.yield s >> return r
+          Right (s',ss')
+            | s' == s1 -> S.yield s01 >> go ss'
+            | otherwise -> S.yield s0 >> goCons s' ss'
+      | otherwise = S.yield s >> go ss
 
 -- TODO: write this properly
 commaize :: (Integral a, Show a) => a -> String

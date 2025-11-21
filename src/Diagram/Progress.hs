@@ -12,7 +12,7 @@ pbSeq :: Int -> String -> [a] -> IO [a]
 pbSeq n message as = do
   pb <- newPB n message
   S.toList_ $
-    S.mapM (\a -> incPB pb >> return a) $ -- streaming does Seq
+    S.mapM (\a -> incPB pb >> return a) $ -- streaming handles Seq
     S.each as
 
 -- | Evaluate to WHNF each element of the list and log the progress with
