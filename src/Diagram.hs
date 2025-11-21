@@ -31,7 +31,8 @@ import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
 import qualified Diagram.Joints as Joints
 import Diagram.Mesh (Mesh(Mesh))
-import qualified Diagram.Mesh as Mesh
+import Diagram.TrainMesh (TrainMesh(TrainMesh))
+import qualified Diagram.TrainMesh as TrainMesh
 import Diagram.Progress (withPB)
 
 -- | Command-line options for the diagram program
@@ -88,7 +89,7 @@ main = do
   let strLen = min maxStrLen $ fromInteger srcByteLen
       -- codeLen0 = strLen * 8
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
-  msh0 <- Mesh.fromStream strLen $
+  msh0 <- TrainMesh.fromStream strLen $
           join $ withPB strLen "Initializing mesh" $ S.splitAt maxStrLen $
           Q.unpack $ Q.fromHandle srcHandle
 
@@ -109,7 +110,7 @@ main = do
     _ -> go sls0 msh0 meval0 -- go
 
       where
-      go sls msh@(Mesh mdl@(Model rs n ks) _ jts _ ls _) meval = do
+      go sls msh@(TrainMesh (Mesh mdl@(Model rs n ks) _ jts) _ ls _) meval = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 
@@ -240,7 +241,7 @@ main = do
         putStrLn $ here $ printf "TRAIN LEN CHANGE: %s bits" lenChangeStr
 
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
-        (_, msh') <- Mesh.pushRule verifyStringMeta msh (s0,s1)
+        (_, msh') <- TrainMesh.pushRule verifyStringMeta msh (s0,s1)
         go sls' msh' meval' -- continue
 
   -- </main loop>

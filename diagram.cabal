@@ -68,6 +68,7 @@ executable diagram
                       Diagram.Dynamic
                       Diagram.Progress
                       Diagram.Streaming
+                      Diagram.TrainMesh
                       Diagram.Information
                       Diagram.Util
 
