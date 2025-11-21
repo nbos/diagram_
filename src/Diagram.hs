@@ -31,6 +31,7 @@ import Diagram.Model (Model(Model))
 import qualified Diagram.Model as Mdl
 import qualified Diagram.Joints as Joints
 import Diagram.Mesh (Mesh(Mesh))
+import qualified Diagram.Mesh as Mesh
 import Diagram.TrainMesh (TrainMesh(TrainMesh))
 import qualified Diagram.TrainMesh as TrainMesh
 import Diagram.Progress (withPB)
@@ -90,7 +91,7 @@ main = do
       -- codeLen0 = strLen * 8
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
   msh0 <- TrainMesh.fromStream strLen $
-          join $ withPB strLen "Initializing mesh" $ S.splitAt maxStrLen $
+          join $ withPB strLen "Initializing train mesh" $ S.splitAt maxStrLen $
           Q.unpack $ Q.fromHandle srcHandle
 
   (evalLen0, meval0) <- case optEval opts of
@@ -98,12 +99,10 @@ main = do
     Just evalFilename -> do
       evalHandle <- openFile evalFilename ReadMode
       evalLen <- fromInteger @Int <$> hFileSize evalHandle
-      (evalMdl0, eval0 :> ()) <- Mdl.fromStream R.empty $
-                                 S.toList $
-                                 S.copy $ S.map fromEnum $
-                                 withPB evalLen "Initializing EVAL model" $
-                                 Q.unpack $ Q.fromHandle evalHandle
-      return (evalLen, Just (evalMdl0, eval0))
+      (eval0, _) <- Mesh.fromStream evalLen $
+                    withPB evalLen "Initializing eval mesh" $
+                    Q.unpack $ Q.fromHandle evalHandle
+      return (evalLen, Just eval0)
 
   -- <main loop>
   case () of
@@ -155,22 +154,15 @@ main = do
         -- :: Maybe Eval :: --
         (factor, codeLen, meval') <- case meval of
           Nothing -> return (trainFactor, trainCodeLen, Nothing)
-          Just (evalMdl@(Model _ en _), evalStr) -> do
+          Just emsh@(Mesh emdl _ _) -> do
             -- : stats :
-            evalCodeLen <- Mdl.codeLen evalMdl
+            evalCodeLen <- Mdl.codeLen emdl
             let evalRatio = fromIntegral evalCodeLen
                             / fromIntegral (evalLen0 * 8) :: Double
                 evalFactor = recip evalRatio
             -- : push rule :
-            en' :> evalStr' :> () <-
-              S.length $ S.toList $ S.copy $
-              subst1M (s0,s1) numSymbols $
-              withPB en "Substituting in EVAL" $
-              S.each evalStr
-            let ek01 = en - en'
-            (_, evalMdl') <- Mdl.pushRule evalMdl (s0,s1) ek01
-
-            return (evalFactor, evalCodeLen, Just (evalMdl', evalStr'))
+            (_, _, emsh') <- Mesh.pushRule verifyStringMeta emsh (s0,s1)
+            return (evalFactor, evalCodeLen, Just emsh')
 
         -- :: Print stats to CSV :: --
         hPutStrLn csvHandle $

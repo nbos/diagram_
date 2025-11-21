@@ -61,13 +61,7 @@ fromStream :: (PrimMonad m, MonadIO m) =>
               Int -> Stream (Of Word8) m r -> m (TrainMesh m r)
 fromStream n as = do
   let rs = R.empty
-  (mdl,(str,(jts,rest))) <- Mdl.fromStream rs $
-                            D.fromStream n $ S.copy $
-                            Joints.fromStream $
-                            S.zip (S.enumFrom 0) $ S.copy $
-                            S.map fromEnum $
-                            withPB n "Initializing mesh" $
-                            S.splitAt n as
+  (msh@(Mesh mdl _ jts), rest) <- Mesh.fromStream n as
 
   bp <- MV.replicate (R.numSymbols rs) Set.empty
   forM_ (M.keys jts) $ \(s0,s1) -> do
@@ -77,7 +71,7 @@ fromStream n as = do
   let Model _ _ mks = mdl
   ls <- Joints.byLoss mks jts
 
-  TrainMesh (Mesh mdl str jts) bp ls <$> Source.new rs rest
+  TrainMesh msh bp ls <$> Source.new rs rest
 
 minLoss :: TrainMesh m r -> (Double, [(Sym,Sym)])
 minLoss (TrainMesh (Mesh (Model rs n _) _ _) _ ls _) =

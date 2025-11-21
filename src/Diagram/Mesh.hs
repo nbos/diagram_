@@ -50,7 +50,6 @@ fromStream n as = do
                             Joints.fromStream $
                             S.zip (S.enumFrom 0) $ S.copy $
                             S.map fromEnum $
-                            withPB n "Initializing mesh" $
                             S.splitAt n as
   return (Mesh mdl str jts, rest)
 
