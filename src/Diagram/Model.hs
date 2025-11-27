@@ -106,7 +106,7 @@ encodeParts rs ss = (rsCode, nCode, ksCode, ssCode)
       mutks <- U.unsafeThaw $ U.replicate numSymbols 0
       forM_ sks $ uncurry $ MV.write mutks
       U.unsafeFreeze mutks
-    ((n,_),ksCode) = Comb.encodeDistribution ks
+    ((n,_),ksCode) = Comb.encodeMultiset ks
     nCode = Elias.encodeDelta $ fromIntegral n
 
 -- | Deserialize a model+symbol string at the head of a given bit vector
@@ -115,7 +115,7 @@ decode :: PrimMonad m => BitVec -> m (Maybe (Model (PrimState m), [Sym], BitVec)
 decode bv
   | Just (rs, bv') <- R.decode bv
   , Just (n , bv'') <- first fromInteger <$> Elias.decodeDelta bv'
-  , Just (ks, bv''') <- Comb.decodeDistribution (n, R.numSymbols rs) bv''
+  , Just (ks, bv''') <- Comb.decodeMultiset (n, R.numSymbols rs) bv''
   , Just (ss, bv'''') <- Comb.decodeMultisetPermutation (zip [0..] ks) bv''' = do
       mdl <- Model rs n <$> U.unsafeThaw (V.fromList ks)
       return $ Just (mdl, ss, bv'''')

@@ -2,4 +2,4 @@ packages: .
 source-repository-package
   type: git
   location: https://github.com/nbos/variety.git
-  tag: 4f6709f000bfe2273a9ec3a1a81c436ad74af4fc
+  tag: d1e27102e7a32c01f0d20acaf36e5d5a45feecb2
