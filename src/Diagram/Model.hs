@@ -203,8 +203,9 @@ nLoss n k01 = eliasCodeLen n' - eliasCodeLen n
 -- difference in code length, in bits, of the serialization. Always
 -- negative.
 kLoss :: Int -> Int -> Int -> Double
-kLoss m n k = log2e * ( iLogFactorial (n - k + m) - iLogFactorial m
-                        - iLogFactorial (n + m - 1) + iLogFactorial (m - 1) )
+kLoss m n k = log2e * ( iLogFactorial (n - k + m)
+                        - iLogFactorial (n + m - 1)
+                        - log (fromIntegral m) )
 
 -- | Given a joint count where the left and right parts are two (2)
 -- different symbols (so s0 /= s1) and the count of the left `k0` and

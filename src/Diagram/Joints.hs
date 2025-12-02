@@ -231,6 +231,11 @@ type ByLoss = IntMap -- k01 :: Int ->
               , Map Double -- , sLoss :: Double ->
                     (Set (Sym,Sym)) ) -- [(s0,s1)] :: [(Sym,Sym)] )
 
+-- | For a naive version of the algorithm, where we only combine the
+-- most frequent joint
+findMaxCount :: ByLoss -> (Int, [(Sym,Sym)])
+findMaxCount = fmap (concatMap Set.toList . snd) . IM.findMax
+
 -- | Given the vector of symbol counts (priors), index the joints by
 -- their counts (k01) first and loss (sLoss) second.
 byLoss :: PrimMonad m => U.MVector (PrimState m) Int -> Joints -> m ByLoss

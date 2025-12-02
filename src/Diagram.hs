@@ -36,9 +36,14 @@ import Diagram.TrainMesh (TrainMesh(TrainMesh))
 import qualified Diagram.TrainMesh as TrainMesh
 import Diagram.Progress (withPB)
 
+data LossFn = CodeLen    -- default
+            | JointCount -- naive, for comparison
+  deriving (Show,Read)
+
 -- | Command-line options for the diagram program
 data Options = Options
   { optFilename         :: !FilePath
+  , optLoss             :: !(Maybe LossFn)
   , optEval             :: !(Maybe FilePath)
   , optSubsample        :: !(Maybe Int)
   , optVerifyMinLoss    :: !Bool
@@ -52,10 +57,15 @@ optionsParser = Options
   ( metavar "FILENAME"
     <> help "Training data" )
   <*> optional
+  (option auto
+    ( long "loss"
+      <> metavar "FUN"
+      <> help "Loss function (CodeLen (default) or JointCount)" ))
+  <*> optional
   (option str
     ( long "eval"
       <> metavar "FILENAME"
-      <> help "String to evaluate (default: same as train)" ))
+      <> help "String to evaluate loss on (default: same as train)" ))
   <*> optional
   (option auto
     ( long "subsample"
@@ -140,9 +150,21 @@ main = do
           (100 * srcCoverage)
 
         -- :: Find next rule :: --
-        let (minLoss, s0s1s) = Joints.findMin numSymbols n ls
-            (s0,s1) = head s0s1s -- TODO: something smarter?
-        let (k01,_) = jts M.! (s0,s1)
+        (minLoss, s0s1s) <- case optLoss opts of
+          Just JointCount -> do -- naive (best case)
+            let (k01, joints) = Joints.findMaxCount ls
+            losses <- forM joints $ \(s0,s1) -> do
+              k0 <- MV.read ks s0
+              if s0 == s1 then return $ Mdl.infoLoss1 numSymbols n k01 k0
+                else Mdl.infoLoss2 numSymbols n k01 k0 <$> MV.read ks s1
+            return $ second (:[]) $ minimum $ -- switch to maximum for worst case
+              zip losses joints
+
+          _codeLen -> -- (default)
+            return $ Joints.findMin numSymbols n ls
+
+        let (s0,s1) = head s0s1s -- TODO: something smarter?
+            (k01,_) = jts M.! (s0,s1)
 
         putStrLn $ here $ "INTRO: " ++
           printf "%s + %s ==> %s (%d × s%d s%d) (%+.2f bits)"
