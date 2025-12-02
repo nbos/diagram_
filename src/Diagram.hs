@@ -45,6 +45,7 @@ data Options = Options
   { optFilename         :: !FilePath
   , optLoss             :: !(Maybe LossFn)
   , optEval             :: !(Maybe FilePath)
+  , optTolerance        :: !(Maybe Int)
   , optSubsample        :: !(Maybe Int)
   , optVerifyMinLoss    :: !Bool
   , optVerifyStringMeta :: !Bool
@@ -68,6 +69,11 @@ optionsParser = Options
       <> help "String to evaluate loss on (default: same as train)" ))
   <*> optional
   (option auto
+    ( long "tolerance"
+      <> metavar "VAL"
+      <> help "Number of positive losses tolerated (default: 0)" ))
+  <*> optional
+  (option auto
     ( long "subsample"
       <> metavar "VAL"
       <> help "Subsample size (default: process entire file)" ))
@@ -86,6 +92,8 @@ main = do
       filename = optFilename opts
       verifyMinLoss = optVerifyMinLoss opts
       verifyStringMeta = optVerifyStringMeta opts
+      policy = fromMaybe CodeLen $ optLoss opts
+      hp0 = fromMaybe 0 $ optTolerance opts
 
   srcHandle <- openFile filename ReadMode
   srcByteLen <- hFileSize srcHandle -- number of atoms in the source
@@ -116,10 +124,10 @@ main = do
 
   -- <main loop>
   case () of
-    _ -> go sls0 msh0 meval0 -- go
+    _ -> go hp0 sls0 msh0 meval0 -- go
 
       where
-      go sls msh@(TrainMesh (Mesh mdl@(Model rs n ks) _ jts) _ ls _) meval = do
+      go hp sls msh@(TrainMesh (Mesh mdl@(Model rs n ks) _ jts) _ ls _) meval = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 
@@ -150,8 +158,9 @@ main = do
           (100 * srcCoverage)
 
         -- :: Find next rule :: --
-        (minLoss, s0s1s) <- case optLoss opts of
-          Just JointCount -> do -- naive (best case)
+        (minLoss, s0s1s) <- case policy of
+          CodeLen -> return $ Joints.findMin numSymbols n ls
+          JointCount -> do -- naive (best case)
             let (k01, joints) = Joints.findMaxCount ls
             losses <- forM joints $ \(s0,s1) -> do
               k0 <- MV.read ks s0
@@ -159,9 +168,6 @@ main = do
                 else Mdl.infoLoss2 numSymbols n k01 k0 <$> MV.read ks s1
             return $ second (:[]) $ minimum $ -- switch to maximum for worst case
               zip losses joints
-
-          _codeLen -> -- (default)
-            return $ Joints.findMin numSymbols n ls
 
         let (s0,s1) = head s0s1s -- TODO: something smarter?
             (k01,_) = jts M.! (s0,s1)
@@ -239,7 +245,9 @@ main = do
         -- </verification>
 
         -- [EXIT]
-        when (minLoss > 0) $
+        let hp' | minLoss > 0 = hp - 1
+                | otherwise = hp
+        when (hp' < 0) $
           putStrLn (here "Reached minimum. Terminating.")
           >> hClose csvHandle
           >> exitSuccess
@@ -256,7 +264,7 @@ main = do
 
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
         (_, msh') <- TrainMesh.pushRule verifyStringMeta msh (s0,s1)
-        go sls' msh' meval' -- continue
+        go hp' sls' msh' meval' -- continue
 
   -- </main loop>
 
