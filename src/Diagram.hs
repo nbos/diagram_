@@ -36,8 +36,9 @@ import Diagram.TrainMesh (TrainMesh(TrainMesh))
 import qualified Diagram.TrainMesh as TrainMesh
 import Diagram.Progress (withPB)
 
-data LossFn = CodeLen    -- default
-            | JointCount -- naive, for comparison
+data LossFn = CodeLen -- code length formula (default)
+            | Count   -- max count
+            | Cond    -- pointwise mutual information: log p(s1|s0) - log p(s1)
   deriving (Show,Read)
 
 -- | Command-line options for the diagram program
@@ -61,7 +62,7 @@ optionsParser = Options
   (option auto
     ( long "loss"
       <> metavar "FUN"
-      <> help "Loss function (CodeLen (default) or JointCount)" ))
+      <> help "Loss function [CodeLen (default), Count, Cond]" ))
   <*> optional
   (option str
     ( long "eval"
@@ -93,6 +94,10 @@ main = do
       verifyMinLoss = optVerifyMinLoss opts
       verifyStringMeta = optVerifyStringMeta opts
       policy = fromMaybe CodeLen $ optLoss opts
+      lossFn = case policy of
+        CodeLen -> Joints.codeLenLoss
+        Count -> Joints.maxCountLoss
+        Cond -> Joints.condLoss
       hp0 = fromMaybe 0 $ optTolerance opts
 
   srcHandle <- openFile filename ReadMode
@@ -108,7 +113,7 @@ main = do
   let strLen = min maxStrLen $ fromInteger srcByteLen
       -- codeLen0 = strLen * 8
       sls0 = U.replicate 256 (1 :: Int) -- symbol lengths
-  msh0 <- TrainMesh.fromStream strLen $
+  msh0 <- TrainMesh.fromStream lossFn strLen $
           join $ withPB strLen "Initializing train mesh" $ S.splitAt maxStrLen $
           Q.unpack $ Q.fromHandle srcHandle
 
@@ -158,18 +163,8 @@ main = do
           (100 * srcCoverage)
 
         -- :: Find next rule :: --
-        (minLoss, s0s1s) <- case policy of
-          CodeLen -> return $ Joints.findMin numSymbols n ls
-          JointCount -> do -- naive (best case)
-            let (k01, joints) = Joints.findMaxCount ls
-            losses <- forM joints $ \(s0,s1) -> do
-              k0 <- MV.read ks s0
-              if s0 == s1 then return $ Mdl.infoLoss1 numSymbols n k01 k0
-                else Mdl.infoLoss2 numSymbols n k01 k0 <$> MV.read ks s1
-            return $ second (:[]) $ minimum $ -- switch to maximum for worst case
-              zip losses joints
-
-        let (s0,s1) = head s0s1s -- TODO: something smarter?
+        let (minLoss, s0s1s) = Joints.findMin numSymbols n ls
+            (s0,s1) = head s0s1s -- TODO: something smarter?
             (k01,_) = jts M.! (s0,s1)
 
         putStrLn $ here $ "INTRO: " ++

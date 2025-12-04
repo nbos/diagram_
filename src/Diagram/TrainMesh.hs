@@ -26,7 +26,7 @@ import qualified Diagram.Rules as R
 import qualified Diagram.Doubly as D
 import Diagram.Model (Model(..))
 import qualified Diagram.Model as Mdl
-import Diagram.Joints (Doubly,ByLoss)
+import Diagram.Joints (Doubly,LossFn,ByLoss(..))
 import qualified Diagram.Joints as Joints
 import Diagram.Mesh (Mesh(Mesh))
 import qualified Diagram.Mesh as Mesh
@@ -58,8 +58,8 @@ checkParity str = (S.next (D.revStream str) >>=) $ \case
 
 -- | Construction with size `n` from a stream of atoms
 fromStream :: (PrimMonad m, MonadIO m) =>
-              Int -> Stream (Of Word8) m r -> m (TrainMesh m r)
-fromStream n as = do
+              LossFn -> Int -> Stream (Of Word8) m r -> m (TrainMesh m r)
+fromStream fn n as = do
   let rs = R.empty
   (msh@(Mesh mdl _ jts), rest) <- Mesh.fromStream n as
 
@@ -69,7 +69,7 @@ fromStream n as = do
     MV.modify bp (Set.insert (s0,s1)) s1
 
   let Model _ _ mks = mdl
-  ls <- Joints.byLoss mks jts
+  ls <- Joints.byLoss fn mks jts
 
   TrainMesh msh bp ls <$> Source.new rs rest
 
@@ -169,16 +169,19 @@ pushRule verify (TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src) (s0,s1) = 
 
   -- <verification>
   when verify $ do
+    let ByLoss _ im'' = ls''
     -- TODO: add custom progress message?
-    lsVerif <- Joints.byLoss ks'' =<< Joints.fromDoubly str''
-    unless (ls'' == lsVerif) $
+    (ByLoss _ imVerif) <- Joints.byLoss fn ks'' =<< Joints.fromDoubly str''
+    unless (im'' == imVerif) $
       let common = IM.keysSet $
                    IM.mapMaybe id $
                    IM.intersectionWith (\v0 v1 -> if v0 == v1 then Just v0 else Nothing)
-                   ls'' lsVerif
+                   im'' imVerif
       in error $ "Error in the maintenance of loss map. Contains:\n"
-         ++ show (ls'' `IM.withoutKeys` common)
-         ++ "\nShould contain:\n" ++ show (lsVerif `IM.withoutKeys` common)
+         ++ show (im'' `IM.withoutKeys` common)
+         ++ "\nShould contain:\n" ++ show (imVerif `IM.withoutKeys` common)
   -- </verification>
 
   return (s01, TrainMesh msh'' bp'' ls'' src'')
+  where
+    ByLoss fn _ = ls

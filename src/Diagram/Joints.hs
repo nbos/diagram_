@@ -225,82 +225,128 @@ validate cdts ss a = do
 -- JOINTS INDEXED BY LOSS --
 ----------------------------
 
--- | Candidates by their counts and loss
-type ByLoss = IntMap -- k01 :: Int ->
-              ( Double -- ( sLossMinBound :: Double
-              , Map Double -- , sLoss :: Double ->
-                    (Set (Sym,Sym)) ) -- [(s0,s1)] :: [(Sym,Sym)] )
+data LossFn = LossFn
+  !(Int -> Int -> Int -> Double) -- :: m -> N -> k01 -> lossA
+  !(Int -> Int -> Double)        -- :: k00 -> k0 -> lossB       (s0 == s1)
+  !(Int -> Int -> Int -> Double) -- :: k01 -> k0 -> k1 -> lossB (s0 /= s1)
+  !(Int -> Double)               -- :: k01 -> minBound lossB
 
--- | For a naive version of the algorithm, where we only combine the
--- most frequent joint
-findMaxCount :: ByLoss -> (Int, [(Sym,Sym)])
-findMaxCount = fmap (concatMap Set.toList . snd) . IM.findMax
+-- | Code length formula
+codeLenLoss :: LossFn
+codeLenLoss = LossFn lossA lossB1 lossB2 minBoundLossB
+  where
+    lossA m n k01 = rLoss + nLoss + kLoss
+      where
+        rLoss = Mdl.rLoss m
+        nLoss = fromIntegral $ Mdl.nLoss n k01
+        kLoss = Mdl.kLoss m n k01
+
+    lossB1 = Mdl.sLoss1
+    lossB2 = Mdl.sLoss2
+    minBoundLossB = iLogFactorial -- == (\k -> sLoss2 k k k)
+
+-- | Negative of joint count
+maxCountLoss :: LossFn
+maxCountLoss = LossFn lossA lossB1 lossB2 minBoundLossB
+  where
+    lossA _ _ k01 = fromIntegral (-k01)
+    lossB1 _ _ = 0
+    lossB2 _ _ _ = 0
+    minBoundLossB _ = 0
+
+-- | Negative of pointwise mutual information
+condLoss :: LossFn
+condLoss = LossFn lossA lossB1 lossB2 minBoundLossB
+  where
+    lossA _ n k01 = - log (fromIntegral n) - log (fromIntegral k01)
+    lossB1 _ k0 = 2 * log (fromIntegral k0)
+    lossB2 _ k0 k1 = log (fromIntegral k0) + log (fromIntegral k1)
+    minBoundLossB k01 = 2 * log (fromIntegral k01)
+
+-- | Candidates by their counts and loss
+data ByLoss = ByLoss !LossFn
+  !( IntMap -- k01 :: Int ->
+     ( Double -- ( minBoundLossB :: Double
+     , Map Double -- , lossB :: Double ->
+       (Set (Sym,Sym)) ) ) -- [(s0,s1)] :: [(Sym,Sym)] )
+
+-- -- | Candidates by their counts and loss
+-- type ByLoss = IntMap -- k01 :: Int ->
+--               ( Double -- ( sLossMinBound :: Double
+--               , Map Double -- , sLoss :: Double ->
+--                     (Set (Sym,Sym)) ) -- [(s0,s1)] :: [(Sym,Sym)] )
+
+-- -- | For a naive version of the algorithm, where we only combine the
+-- -- most frequent joint
+-- findMaxCount :: ByLoss -> (Int, [(Sym,Sym)])
+-- findMaxCount = fmap (concatMap Set.toList . snd) . IM.findMax
 
 -- | Given the vector of symbol counts (priors), index the joints by
 -- their counts (k01) first and loss (sLoss) second.
-byLoss :: PrimMonad m => U.MVector (PrimState m) Int -> Joints -> m ByLoss
-byLoss mks jts = do
+byLoss :: PrimMonad m => LossFn -> U.MVector (PrimState m) Int -> Joints -> m ByLoss
+byLoss fn@(LossFn _ lB1 lB2 minlB) mks jts = do
   im <- IM.fromListWith (M.unionWith Set.union) <$>
         mapM (uncurry mkEntry) (M.toList jts) -- TODO: M.fold
-  return $ IM.mapWithKey (\k01 e -> (sLossMinBound k01, e)) im
+  return $ ByLoss fn $ IM.mapWithKey (\k01 e -> (minlB k01, e)) im
   where
     mkEntry (s0,s1) (k01,_)
       | s0 == s1 = do
           k0 <- MV.read mks s0
-          return (k01, M.singleton (Mdl.sLoss1 k01 k0) $
+          return (k01, M.singleton (lB1 k01 k0) $
                        Set.singleton (s0,s1))
       | otherwise = do
           k0 <- MV.read mks s0
           k1 <- MV.read mks s1
-          return (k01, M.singleton (Mdl.sLoss2 k01 k0 k1) $
+          return (k01, M.singleton (lB2 k01 k0 k1) $
                        Set.singleton (s0,s1))
 
-sLossMinBound :: Int -> Double
-sLossMinBound = iLogFactorial -- == (\k -> sLoss2 k k k)
+-- sLossMinBound :: Int -> Double
+-- sLossMinBound = iLogFactorial -- == (\k -> sLoss2 k k k)
 
 -- | Given the number of symbols and length of the string, return the
 -- joints that have the minimal loss
 findMin :: Int -> Int -> ByLoss -> (Double, [(Sym,Sym)])
-findMin symbolCount n im = case IM.toDescList im of
+findMin numSymbols n (ByLoss fn im) = case IM.toDescList im of
   [] -> error "Joints.findMin: no joints in map"
   (k01,(_,m)):rest -> go (loss,jts) rest
     where
-      (sLoss,jts) = Set.toList <$> M.findMin m
-      nLoss = fromIntegral $ Mdl.nLoss n k01
-      kLoss = Mdl.kLoss symbolCount n k01
-      loss = rLoss + nLoss + kLoss + sLoss
+      lossA = lA numSymbols n k01
+      (lossB,jts) = Set.toList <$> M.findMin m
+      loss = lossA + lossB
   where
-    rLoss = Mdl.rLoss symbolCount
+    LossFn lA _ _ _ = fn
     go e [] = e
-    go e@(bestLoss, bestJts) ((k01,(sMinBound,m)):rest)
+    go e@(bestLoss, bestJts) ((k01,(minBoundLossB, m)):rest)
       | lossMinBound > bestLoss = e -- end
       | otherwise = case compare loss bestLoss of
           EQ -> go (loss, jts ++ bestJts) rest -- append
           LT -> go (loss, jts) rest -- replace
           GT -> go e rest -- continue
       where
-        nLoss = fromIntegral $ Mdl.nLoss n k01
-        kLoss = Mdl.kLoss symbolCount n k01
-        rnkLoss = rLoss + nLoss + kLoss
-        lossMinBound = rnkLoss + sMinBound
-        (sLoss,jts) = Set.toList <$> M.findMin m
-        loss = rnkLoss + sLoss
+        lossA = lA numSymbols n k01
+        lossMinBound = lossA + minBoundLossB
+        (lossB,jts) = Set.toList <$> M.findMin m
+        loss = lossA + lossB
 
 insertLoss :: (Int,(Int,Int)) -> (Sym,Sym) -> ByLoss -> ByLoss
-insertLoss (k01,(k0,k1)) (s0,s1) = IM.insertWith f k01 ( sLossMinBound k01
-                                                       , M.singleton sLoss is )
+insertLoss (k01,(k0,k1)) (s0,s1) (ByLoss fn im) = ByLoss fn $
+  IM.insertWith f k01 ( minlB k01
+                      , M.singleton lossB is ) im
   where
-    sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
-          | otherwise = Mdl.sLoss2 k01 k0 k1
-    f _ (b,m) = (b, M.insertWith f' sLoss is m)
+    LossFn _ lB1 lB2 minlB = fn
+    lossB | s0 == s1 = lB1 k01 k0
+          | otherwise = lB2 k01 k0 k1
+    f _ (b,m) = (b, M.insertWith f' lossB is m)
     f' _ = Set.insert (s0,s1)
     is = Set.singleton (s0,s1)
 
 deleteLoss :: (Int,(Int,Int)) -> (Sym,Sym) -> ByLoss -> ByLoss
-deleteLoss (k01,(k0,k1)) (s0,s1) = IM.update f k01
+deleteLoss (k01,(k0,k1)) (s0,s1) (ByLoss fn im) = ByLoss fn $
+                                                  IM.update f k01 im
   where
-    sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
-          | otherwise = Mdl.sLoss2 k01 k0 k1
+    LossFn _ lB1 lB2 _ = fn
+    sLoss | s0 == s1 = lB1 k01 k0
+          | otherwise = lB2 k01 k0 k1
     f (b,m) = (b,) <$> nothingIf M.null (M.update f' sLoss m)
     f' = nothingIf Set.null . Set.delete (s0,s1)
 
