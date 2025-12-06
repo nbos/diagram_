@@ -254,21 +254,22 @@ codeLenLoss = LossFn fA fB1 fB2 minBoundfB
 
 -- | Negative of joint count
 maxCountLoss :: LossFn
-maxCountLoss = LossFn lossA lossB1 lossB2 minBoundLossB
+maxCountLoss = LossFn fA fB1 fB2 minBoundfB
   where
-    lossA _ _ k01 = fromIntegral (-k01)
-    lossB1 _ _ = 0
-    lossB2 _ _ _ = 0
-    minBoundLossB _ = 0
+    fA _ _ k01 = fromIntegral (-k01)
+    fB1 _ _ = 0
+    fB2 _ _ _ = 0
+    minBoundfB _ = 0
 
--- | Negative of pointwise mutual information
+-- | Negative of "conditional proabability ratio" ("pointwise mutual
+-- information")
 condLoss :: LossFn
-condLoss = LossFn lossA lossB1 lossB2 minBoundLossB
+condLoss = LossFn fA fB1 fB2 minBoundfB
   where
-    lossA _ n k01 = - log (fromIntegral n) - log (fromIntegral k01)
-    lossB1 _ k0 = 2 * log (fromIntegral k0)
-    lossB2 _ k0 k1 = log (fromIntegral k0) + log (fromIntegral k1)
-    minBoundLossB k01 = 2 * log (fromIntegral k01)
+    fA _ n k01 = - log (fromIntegral n) - 2 * log (fromIntegral k01)
+    fB1 _ k0 = 2 * log (fromIntegral k0)
+    fB2 _ k0 k1 = log (fromIntegral k0) + log (fromIntegral k1)
+    minBoundfB k01 = 2 * log (fromIntegral k01)
 
 -- | Candidates by their counts and loss
 data ByLoss = ByLoss !LossFn

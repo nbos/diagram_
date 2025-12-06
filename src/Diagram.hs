@@ -163,7 +163,7 @@ main = do
         putStrLn ""
         putStrLn $ here $
           printf ("TRAIN LEN: %s bits (%s + %s + %s + %s + %s), %.2f%% of orig., "
-                  ++ "factor: %.4f, over %.2f%% of input")
+                  ++ "factor: %.4f, N = %s (%.2f%% of input)")
           (commaize trainCodeLen)
           (commaize mCodeLen)  -- (train)
           (commaize rsCodeLen) -- (train)
@@ -172,6 +172,7 @@ main = do
           (commaize ssCodeLen) -- (train)
           (trainRatio * 100)
           trainFactor
+          (commaize n)
           (100 * srcCoverage)
 
         -- :: Find next rule :: --
@@ -228,10 +229,11 @@ main = do
           (minLoss',((s0',s1'),(k01',_))) <- case L.sort cdtList of
             [] -> error "no candidates"
             (c@(loss,_):cdts') -> do
-              when (loss < 0) $ putStrLn $ here $
-                                "Top candidate: \n   " ++ showCdt rs c
-              putStrLn $ here "Next top candidates:"
-              forM_ (take 4 cdts') (putStrLn . ("   " ++) . showCdt rs)
+              when (loss < 0) $
+                putStr (here "Top candidate: \n   ") >> printCdt rs ks c
+              putStrLn (here "Next top candidates:")
+              forM_ (take 4 cdts') $ \c' -> putStr "   "
+                                            >> printCdt rs ks c'
               return c
 
           -- TODO: relax this condition: sometimes the head candidate is
@@ -280,11 +282,14 @@ main = do
   -- </main loop>
 
   where
-    showCdt rs (loss,((s0,s1),(n01,_))) = printf "%+.2f bits (%d × s%d s%d): %s + %s ==> %s"
-      loss n01 s0 s1
-      (show $ R.toString rs [s0])
-      (show $ R.toString rs [s1])
-      (show $ R.toString rs [s0,s1])
+    printCdt rs ks (loss,((s0,s1),(n01,_))) = do
+      k0 <- MV.read ks s0
+      k1 <- MV.read ks s1
+      printf "%+.2f: %d × s%d(%d) s%d(%d): %s + %s ==> %s\n"
+        loss n01 s0 k0 s1 k1
+        (show $ R.toString rs [s0])
+        (show $ R.toString rs [s1])
+        (show $ R.toString rs [s0,s1])
 
 -- | Substitute a single pair of symbols for a constructed joint symbol
 -- in a string of symbols

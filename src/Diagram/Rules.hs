@@ -161,6 +161,7 @@ rRecip rs s01 s0 = go [] s01
                            ++ show (s01, s0, prefixes rs s01)
 
 -- | Resolve the symbol back into a string of chars
+-- FIXME: seems to always print "\65533" on unprintable bytes
 toString :: Rules -> [Sym] -> String
 toString = UTF8.toString
            . BS.pack
