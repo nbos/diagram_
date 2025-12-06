@@ -38,7 +38,8 @@ import Diagram.Progress (withPB)
 
 data LossFn = CodeLen -- code length formula (default)
             | Count   -- max count
-            | Cond    -- pointwise mutual information: log p(s1|s0) - log p(s1)
+            | Cond    -- pointwise mutual information: k01 * (log p(s1|s0) - log p(s1))
+            | WCond !Double -- weighted pointwise mutual information
   deriving (Show,Read)
 
 -- | Command-line options for the diagram program
@@ -109,6 +110,7 @@ main = do
         CodeLen -> Joints.codeLenLoss
         Count -> Joints.maxCountLoss
         Cond -> Joints.condLoss
+        WCond a -> Joints.wCondLoss a
       -- hp0 = fromMaybe 0 $ optTolerance opts
       -- targetM = fromMaybe 256 $ optTargetM opts
 

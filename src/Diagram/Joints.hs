@@ -271,6 +271,18 @@ condLoss = LossFn fA fB1 fB2 minBoundfB
     fB2 _ k0 k1 = log (fromIntegral k0) + log (fromIntegral k1)
     minBoundfB k01 = 2 * log (fromIntegral k01)
 
+-- | (negative of) Weighted pointwise mutual information
+wCondLoss :: Double -> LossFn
+wCondLoss a = LossFn fA fB1 fB2 minBoundfB
+  where
+    aC = 1.0 - a
+    fA m n k01 = a * cfA m n k01 + aC * kfA m n k01
+    fB1 k00 k0 = a * cfB1 k00 k0 + aC * kfB1 k00 k0
+    fB2 k01 k0 k1 = a * cfB2 k01 k0 k1 + aC * kfB2 k01 k0 k1
+    minBoundfB k01 = a * cmbfB k01 + aC * kmbfB k01
+    LossFn cfA cfB1 cfB2 cmbfB = condLoss
+    LossFn kfA kfB1 kfB2 kmbfB = maxCountLoss
+
 -- | Candidates by their counts and loss
 data ByLoss = ByLoss !LossFn
   !( IntMap -- k01 :: Int ->

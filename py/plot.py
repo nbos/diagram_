@@ -43,13 +43,38 @@ def decimal_notation_formatter(x, pos):
         return f"{x:.4g}"  # four significant figures
 
 
+def generate_output_filename(csv_files, max_length=200):
+    """Generate output filename, avoiding filesystem length limits."""
+    basenames = [os.path.splitext(os.path.basename(f))[0] for f in csv_files]
+
+    # If only a few files, use all names
+    if len(csv_files) <= 3:
+        out_name = "_".join(basenames) + ".png"
+    else:
+        # For many files, use first two names + count
+        out_name = f"{basenames[0]}_{basenames[1]}_and_{len(csv_files)-2}_more.png"
+
+    # Safety check: if still too long, use generic name
+    if len(out_name) > max_length:
+        out_name = f"plot_{len(csv_files)}_files.png"
+
+    return out_name
+
+
 def main(csv_files):
     plt.figure(figsize=(6, 4))
 
+    # Store color and linestyle as tuples
     line_styles = [
-        'k-', 'k--', 'k:', 'k-.',
-        (0, (5, 1)), (0, (3, 5, 1, 5)),
-        (0, (3, 1, 1, 1)), (0, (1, 1)), (0, (5, 10))
+        ('k', '-'),
+        ('k', '--'),
+        ('k', ':'),
+        ('k', '-.'),
+        ('k', (0, (5, 1))),
+        ('k', (0, (3, 5, 1, 5))),
+        ('k', (0, (3, 1, 1, 1))),
+        ('k', (0, (1, 1))),
+        ('k', (0, (5, 10)))
     ]
 
     all_x, all_y = [], []
@@ -62,9 +87,10 @@ def main(csv_files):
         all_x.extend(x)
         all_y.extend(y)
 
-        style = line_styles[idx % len(line_styles)]
+        # Unpack color and linestyle, use as keyword arguments
+        color, linestyle = line_styles[idx % len(line_styles)]
         basename = os.path.splitext(os.path.basename(csv_path))[0]
-        plt.plot(x, y, style, linewidth=1.5, label=basename)
+        plt.plot(x, y, color=color, linestyle=linestyle, linewidth=1.5, label=basename)
 
     if not all_x or not all_y:
         print("No valid data found in provided CSV files.")
@@ -98,7 +124,8 @@ def main(csv_files):
     plt.legend(fontsize=10)
     plt.tick_params(axis='both', which='major', labelsize=10)
 
-    out_name = "_".join([os.path.splitext(os.path.basename(f))[0] for f in csv_files]) + ".png"
+    # Generate safe output filename
+    out_name = generate_output_filename(csv_files)
     plt.tight_layout()
     plt.savefig(out_name, dpi=300, bbox_inches='tight')
     plt.show()
