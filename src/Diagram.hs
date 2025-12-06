@@ -46,7 +46,8 @@ data Options = Options
   { optFilename         :: !FilePath
   , optLoss             :: !(Maybe LossFn)
   , optEval             :: !(Maybe FilePath)
-  , optTolerance        :: !(Maybe Int)
+  , optTargetM          :: !(Maybe Int)
+  -- , optTolerance        :: !(Maybe Int)
   , optSubsample        :: !(Maybe Int)
   , optVerifyMinLoss    :: !Bool
   , optVerifyStringMeta :: !Bool
@@ -61,21 +62,31 @@ optionsParser = Options
   <*> optional
   (option auto
     ( long "loss"
+      <> short 'l'
       <> metavar "FUN"
       <> help "Loss function [CodeLen (default), Count, Cond]" ))
   <*> optional
   (option str
     ( long "eval"
+      <> short 'e'
       <> metavar "FILENAME"
       <> help "String to evaluate loss on (default: same as train)" ))
   <*> optional
   (option auto
-    ( long "tolerance"
-      <> metavar "VAL"
-      <> help "Number of positive losses tolerated (default: 0)" ))
+    ( long "to-size"
+      <> short 'm'
+      <> metavar "NUM"
+      <> help "Produce dictionary of given size" ))
+  -- <*> optional
+  -- (option auto
+  --   ( long "tolerance"
+  --     <> short 't'
+  --     <> metavar "NUM"
+  --     <> help "Number of positive losses tolerated (default: 0)" ))
   <*> optional
   (option auto
     ( long "subsample"
+      <> short 's'
       <> metavar "VAL"
       <> help "Subsample size (default: process entire file)" ))
   <*> switch
@@ -98,7 +109,8 @@ main = do
         CodeLen -> Joints.codeLenLoss
         Count -> Joints.maxCountLoss
         Cond -> Joints.condLoss
-      hp0 = fromMaybe 0 $ optTolerance opts
+      -- hp0 = fromMaybe 0 $ optTolerance opts
+      -- targetM = fromMaybe 256 $ optTargetM opts
 
   srcHandle <- openFile filename ReadMode
   srcByteLen <- hFileSize srcHandle -- number of atoms in the source
@@ -129,10 +141,10 @@ main = do
 
   -- <main loop>
   case () of
-    _ -> go hp0 sls0 msh0 meval0 -- go
+    _ -> go sls0 msh0 meval0 -- go
 
       where
-      go hp sls msh@(TrainMesh (Mesh mdl@(Model rs n ks) _ jts) _ ls _) meval = do
+      go sls msh@(TrainMesh (Mesh mdl@(Model rs n ks) _ jts) _ ls _) meval = do
         let numSymbols = R.numSymbols rs
             here = (++) (" [" ++ show numSymbols ++ "]: ")
 
@@ -168,7 +180,7 @@ main = do
             (k01,_) = jts M.! (s0,s1)
 
         putStrLn $ here $ "INTRO: " ++
-          printf "%s + %s ==> %s (%d × s%d s%d) (%+.2f bits)"
+          printf "%s + %s ==> %s (%d × s%d s%d) (loss: %+.2f)"
           (show $ R.toString rs [s0])
           (show $ R.toString rs [s1])
           (show $ R.toString rs [s0,s1])
@@ -202,12 +214,13 @@ main = do
 
         -- <verification>
         when verifyMinLoss $ do
-          k0 <- MV.read ks s0
-          k1 <- MV.read ks s1
           cdtList <- S.toList_ $
-            S.mapM (\cdt@(s0s1,(n01',_)) -> do
-                       loss <- Mdl.naiveInfoDelta mdl s0s1 n01'
-                       return (loss,cdt)) $
+            S.mapM (\cdt@(s0s1,(k01',_)) -> do
+                       k0 <- MV.read ks $ fst s0s1
+                       k1 <- MV.read ks $ snd s0s1
+                       let k0k1 = (k0,k1)
+                           loss = Joints.evalLoss lossFn numSymbols n k01' s0s1 k0k1
+                       return (loss, cdt)) $
             withPB (M.size jts) (here "Evaluating all losses (--verify-min-loss)") $
             S.each $ M.toList jts
 
@@ -226,24 +239,27 @@ main = do
           -- pushes it a bit back
           when (relativeError minLoss minLoss' > 1e-5
                 || notElem (s0',s1') s0s1s) $ do
-            let rLoss = Mdl.rLoss numSymbols
-                nLoss = Mdl.nLoss n k01
-                kLoss = Mdl.kLoss numSymbols n k01
-                sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
-                      | otherwise = Mdl.sLoss2 k01 k0 k1
+            -- let rLoss = Mdl.rLoss numSymbols
+            --     nLoss = Mdl.nLoss n k01
+            --     kLoss = Mdl.kLoss numSymbols n k01
+            -- k0 <- MV.read ks s0
+            -- k1 <- MV.read ks s1
+            -- let sLoss | s0 == s1 = Mdl.sLoss1 k01 k0
+            --           | otherwise = Mdl.sLoss2 k01 k0 k1
             naiveParts <- Mdl.naiveInfoDeltaParts mdl (s0',s1') k01'
             error $ "loss mismatch:\nfrom map:   "
-              ++ show (minLoss, k01, head s0s1s, tail s0s1s)
-              ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
+              ++ show ((("minLoss" :: String, minLoss)
+                       ,("k01" :: String, k01))
+                      ,(("head s0s1s" :: String, head s0s1s)
+                       ,("tail s0s1s" :: String, tail s0s1s)))
+--              ++ "\nfields:     " ++ show (rLoss,nLoss,kLoss,sLoss)
               ++ "\nfrom naive: " ++ show (minLoss', k01', (s0',s1'))
               ++ "\nfields:     " ++ show naiveParts
         -- </verification>
 
         -- [EXIT]
-        let hp' | minLoss > 0 = hp - 1
-                | otherwise = hp
-        when (hp' < 0) $
-          putStrLn (here "Reached minimum. Terminating.")
+        when (maybe (minLoss > 0) (numSymbols >=) (optTargetM opts)) $
+          putStrLn (here "Reached stopping condition. Terminating.")
           >> hClose csvHandle
           >> exitSuccess
 
@@ -259,7 +275,7 @@ main = do
 
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
         (_, msh') <- TrainMesh.pushRule verifyStringMeta msh (s0,s1)
-        go hp' sls' msh' meval' -- continue
+        go sls' msh' meval' -- continue
 
   -- </main loop>
 

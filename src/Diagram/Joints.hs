@@ -231,19 +231,26 @@ data LossFn = LossFn
   !(Int -> Int -> Int -> Double) -- :: k01 -> k0 -> k1 -> lossB (s0 /= s1)
   !(Int -> Double)               -- :: k01 -> minBound lossB
 
+evalLoss :: LossFn -> Int -> Int -> Int -> (Sym, Sym) -> (Int, Int) -> Double
+evalLoss (LossFn fA fB1 fB2 _) m n k01 (s0,s1) (k0,k1) = lossA + lossB
+  where
+    lossA = fA m n k01
+    lossB | s0 == s1 = fB1 k01 k0
+          | otherwise = fB2 k01 k0 k1
+
 -- | Code length formula
 codeLenLoss :: LossFn
-codeLenLoss = LossFn lossA lossB1 lossB2 minBoundLossB
+codeLenLoss = LossFn fA fB1 fB2 minBoundfB
   where
-    lossA m n k01 = rLoss + nLoss + kLoss
+    fA m n k01 = rLoss + nLoss + kLoss
       where
         rLoss = Mdl.rLoss m
         nLoss = fromIntegral $ Mdl.nLoss n k01
         kLoss = Mdl.kLoss m n k01
 
-    lossB1 = Mdl.sLoss1
-    lossB2 = Mdl.sLoss2
-    minBoundLossB = iLogFactorial -- == (\k -> sLoss2 k k k)
+    fB1 = Mdl.sLoss1
+    fB2 = Mdl.sLoss2
+    minBoundfB = iLogFactorial -- == (\k -> sLoss2 k k k)
 
 -- | Negative of joint count
 maxCountLoss :: LossFn
