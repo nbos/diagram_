@@ -36,10 +36,11 @@ import Diagram.TrainMesh (TrainMesh(TrainMesh))
 import qualified Diagram.TrainMesh as TrainMesh
 import Diagram.Progress (withPB)
 
-data LossFn = CodeLen -- code length formula (default)
-            | Count   -- max count
-            | Cond    -- pointwise mutual information: k01 * (log p(s1|s0) - log p(s1))
-            | WCond !Double -- weighted pointwise mutual information
+data LossFn = CodeLen -- min code length (default)
+            | JointCount -- max joint count (naive)
+            | PMI -- max pointwise mutual information
+            | SPMI -- max scaled PMI
+            | PMIk !Double -- weighted pointwise mutual information
   deriving (Show,Read)
 
 -- | Command-line options for the diagram program
@@ -65,7 +66,7 @@ optionsParser = Options
     ( long "loss"
       <> short 'l'
       <> metavar "FUN"
-      <> help "Loss function [CodeLen (default), Count, Cond]" ))
+      <> help "Loss function (default: code length)" ))
   <*> optional
   (option str
     ( long "eval"
@@ -107,10 +108,11 @@ main = do
       verifyStringMeta = optVerifyStringMeta opts
       policy = fromMaybe CodeLen $ optLoss opts
       lossFn = case policy of
-        CodeLen -> Joints.codeLenLoss
-        Count -> Joints.maxCountLoss
-        Cond -> Joints.condLoss
-        WCond a -> Joints.wCondLoss a
+        CodeLen -> Joints.codeLenDelta
+        JointCount -> Joints.negCount
+        PMI -> Joints.negPMI
+        SPMI -> Joints.negSPMI
+        PMIk k -> Joints.negPMIk k
       -- hp0 = fromMaybe 0 $ optTolerance opts
       -- targetM = fromMaybe 256 $ optTargetM opts
 

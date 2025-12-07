@@ -239,8 +239,8 @@ evalLoss (LossFn fA fB1 fB2 _) m n k01 (s0,s1) (k0,k1) = lossA + lossB
           | otherwise = fB2 k01 k0 k1
 
 -- | Code length formula
-codeLenLoss :: LossFn
-codeLenLoss = LossFn fA fB1 fB2 minBoundfB
+codeLenDelta :: LossFn
+codeLenDelta = LossFn fA fB1 fB2 minBoundfB
   where
     fA m n k01 = rLoss + nLoss + kLoss
       where
@@ -253,35 +253,49 @@ codeLenLoss = LossFn fA fB1 fB2 minBoundfB
     minBoundfB = iLogFactorial -- == (\k -> sLoss2 k k k)
 
 -- | Negative of joint count
-maxCountLoss :: LossFn
-maxCountLoss = LossFn fA fB1 fB2 minBoundfB
+negCount :: LossFn
+negCount = LossFn fA fB1 fB2 minBoundfB
   where
     fA _ _ k01 = fromIntegral (-k01)
     fB1 _ _ = 0
     fB2 _ _ _ = 0
     minBoundfB _ = 0
 
--- | Negative of "conditional proabability ratio" ("pointwise mutual
--- information")
-condLoss :: LossFn
-condLoss = LossFn fA fB1 fB2 minBoundfB
+-- | Negative of "pointwise mutual information". Minimizing this
+-- maximizes PMI.
+negPMI :: LossFn
+negPMI = LossFn fA fB1 fB2 minBoundfB
   where
-    fA _ n k01 = - log (fromIntegral n) - 2 * log (fromIntegral k01)
-    fB1 _ k0 = 2 * log (fromIntegral k0)
-    fB2 _ k0 k1 = log (fromIntegral k0) + log (fromIntegral k1)
-    minBoundfB k01 = 2 * log (fromIntegral k01)
+    fi = fromIntegral
+    fA _ n k01 = - log (fi n) - log (fi k01)
+    fB1 _ k0 = 2 * log (fi k0)
+    fB2 _ k0 k1 = log (fi k0) + log (fi k1)
+    minBoundfB k01 = 2 * log (fi k01)
 
--- | (negative of) Weighted pointwise mutual information
-wCondLoss :: Double -> LossFn
-wCondLoss a = LossFn fA fB1 fB2 minBoundfB
+-- | Negative of "pointwise mutual information", scaled by the joint
+-- count
+negSPMI :: LossFn
+negSPMI = LossFn fA fB1 fB2 minBoundfB
   where
-    aC = 1.0 - a
-    fA m n k01 = a * cfA m n k01 + aC * kfA m n k01
-    fB1 k00 k0 = a * cfB1 k00 k0 + aC * kfB1 k00 k0
-    fB2 k01 k0 k1 = a * cfB2 k01 k0 k1 + aC * kfB2 k01 k0 k1
-    minBoundfB k01 = a * cmbfB k01 + aC * kmbfB k01
-    LossFn cfA cfB1 cfB2 cmbfB = condLoss
-    LossFn kfA kfB1 kfB2 kmbfB = maxCountLoss
+    fi = fromIntegral
+    fA _ n k01 = fi k01 * (- log (fi n) - log (fi k01))
+    fB1 k00 k0 = fi k00 * (2 * log (fi k0))
+    fB2 k01 k0 k1 = fi k01 * (log (fi k0) + log (fi k1))
+    minBoundfB k01 = fi k01 * (2 * log (fi k01))
+
+-- | Negative of "pointwise mutual information" times the number of
+-- occurences given a parameter `k` that scales the joints
+-- information. k = 1.0 gives 'negPMI'.
+negPMIk :: Double -> LossFn
+negPMIk _ = undefined -- LossFn fA fB1 fB2 minBoundfB
+  -- where
+  --   aC = 1.0 - a
+  --   fA m n k01 = a * cfA m n k01 + aC * kfA m n k01
+  --   fB1 k00 k0 = a * cfB1 k00 k0 + aC * kfB1 k00 k0
+  --   fB2 k01 k0 k1 = a * cfB2 k01 k0 k1 + aC * kfB2 k01 k0 k1
+  --   minBoundfB k01 = a * cmbfB k01 + aC * kmbfB k01
+  --   LossFn cfA cfB1 cfB2 cmbfB = negPMI
+  --   LossFn kfA kfB1 kfB2 kmbfB = negCount
 
 -- | Candidates by their counts and loss
 data ByLoss = ByLoss !LossFn
