@@ -22,7 +22,6 @@ import Numeric.MathFunctions.Comparison (relativeError)
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Generic.Mutable as MV
 
-import Streaming
 import qualified Streaming.Prelude as S
 import qualified Streaming.ByteString as Q
 
@@ -53,6 +52,7 @@ data Options = Options
   , optSubsample        :: !(Maybe Int)
   , optVerifyMinLoss    :: !Bool
   , optVerifyStringMeta :: !Bool
+  , optVerifyConstr     :: !Bool
   } deriving (Show)
 
 -- | Parser for command-line options
@@ -97,6 +97,9 @@ optionsParser = Options
   <*> switch
   ( long "verify-string-meta"
      <> help "Verify train length, counts & joint counts" )
+  <*> switch
+  ( long "verify-construction"
+     <> help "Verify string construction order" )
 
 main :: IO ()
 main = do
@@ -105,7 +108,8 @@ main = do
   let maxStrLen = fromMaybe maxBound (optSubsample opts)
       filename = optFilename opts
       verifyMinLoss = optVerifyMinLoss opts
-      verifyStringMeta = optVerifyStringMeta opts
+      verifyMeta = optVerifyStringMeta opts
+      verifyConstr = optVerifyConstr opts
       policy = fromMaybe CodeLen $ optLoss opts
       lossFn = case policy of
         CodeLen -> Joints.codeLenDelta
@@ -201,7 +205,7 @@ main = do
                             / fromIntegral (evalLen0 * 8) :: Double
                 evalFactor = recip evalRatio
             -- : push rule :
-            (_, _, emsh') <- Mesh.pushRule verifyStringMeta emsh (s0,s1)
+            (_, _, emsh') <- Mesh.pushRule verifyConstr verifyMeta emsh (s0,s1)
             return (evalFactor, evalCodeLen, Just emsh')
 
         -- :: Print stats to CSV :: --
@@ -280,7 +284,7 @@ main = do
         putStrLn $ here $ printf "TRAIN LEN CHANGE: %s bits" lenChangeStr
 
         let sls' = U.snoc sls $ sum $ R.symbolLength rs <$> [s0,s1]
-        (_, msh') <- TrainMesh.pushRule verifyStringMeta msh (s0,s1)
+        (_, msh') <- TrainMesh.pushRule verifyConstr verifyMeta msh (s0,s1)
         go sls' msh' meval' -- continue
 
   -- </main loop>
@@ -294,34 +298,6 @@ main = do
         (show $ R.toString rs [s0])
         (show $ R.toString rs [s1])
         (show $ R.toString rs [s0,s1])
-
--- | Substitute a single pair of symbols for a constructed joint symbol
--- in a string of symbols
-subst1 :: (Int,Int) -> Int -> [Int] -> [Int]
-subst1 (s0,s1) s01 = go
-  where
-    go [] = []
-    go [s] = [s]
-    go (s:s':ss) | s == s0 && s' == s1 = s01:go ss
-                 | otherwise = s:go (s':ss)
-
--- | Monadic single construction rule substitution using Streams
-subst1M :: forall m r. Monad m => (Int, Int) -> Int ->
-          Stream (Of Int) m r -> Stream (Of Int) m r
-subst1M (s0,s1) s01 = go
-  where
-    go :: Stream (Of Int) m r -> Stream (Of Int) m r
-    go ss = (lift (S.next ss) >>=) $ \case
-      Left r -> return r
-      Right (s,ss') -> goCons s ss'
-
-    goCons s ss
-      | s == s0 = (lift (S.next ss) >>=) $ \case
-          Left r -> S.yield s >> return r
-          Right (s',ss')
-            | s' == s1 -> S.yield s01 >> go ss'
-            | otherwise -> S.yield s0 >> goCons s' ss'
-      | otherwise = S.yield s >> go ss
 
 -- TODO: write this properly
 commaize :: (Integral a, Show a) => a -> String

@@ -77,6 +77,9 @@ symbolLengths rs = runST $ do
 fromList :: [(Sym,Sym)] -> Rules
 fromList = V.fromList
 
+toList :: Rules -> [(Sym,Sym)]
+toList = V.toList
+
 -- | Add a new symbol with a construction rule. Returns updated rules
 -- and index of new symbol. O(n)
 pushRule :: (Sym,Sym) -> Rules -> (Sym, Rules)
@@ -242,6 +245,36 @@ splitAtSubst rs rsm trie = go []
         if not (null extra) then return $ S.each extra >>
                                  S.each fwd' >> src' -- done
           else go (reverse fwd') (n - m) src'
+
+-- LEGACY --
+
+-- | Substitute a single pair of symbols for a constructed joint symbol
+-- in a string of symbols
+subst1 :: (Int,Int) -> Int -> [Int] -> [Int]
+subst1 (s0,s1) s01 = go
+  where
+    go [] = []
+    go [s] = [s]
+    go (s:s':ss) | s == s0 && s' == s1 = s01:go ss
+                 | otherwise = s:go (s':ss)
+
+-- | Monadic single construction rule substitution using Streams
+subst1M :: forall m r. Monad m => (Int, Int) -> Int ->
+          Stream (Of Int) m r -> Stream (Of Int) m r
+subst1M (s0,s1) s01 = go
+  where
+    go :: Stream (Of Int) m r -> Stream (Of Int) m r
+    go ss = (lift (S.next ss) >>=) $ \case
+      Left r -> return r
+      Right (s,ss') -> goCons s ss'
+
+    goCons s ss
+      | s == s0 = (lift (S.next ss) >>=) $ \case
+          Left r -> S.yield s >> return r
+          Right (s',ss')
+            | s' == s1 -> S.yield s01 >> go ss'
+            | otherwise -> S.yield s0 >> goCons s' ss'
+      | otherwise = S.yield s >> go ss
 
 --------------
 -- INDEXING --

@@ -78,11 +78,12 @@ minLoss (TrainMesh (Mesh (Model rs n _) _ _) _ ls _) =
   Joints.findMin (R.numSymbols rs) n ls
 
 -- | Add a rule, rewrite, refill, with progress bars
-pushRule :: (PrimMonad m, MonadIO m) =>
-            Bool -> TrainMesh m r -> (Sym,Sym) -> m (Sym, TrainMesh m r)
-pushRule verify (TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src) (s0,s1) = do
+pushRule :: (PrimMonad m, MonadIO m) => Bool -> Bool ->
+            TrainMesh m r -> (Sym,Sym) -> m (Sym, TrainMesh m r)
+pushRule verifyString verifyMeta tm (s0,s1) = do
+  let TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src = tm
   (s01, (am, rm), msh'@(Mesh mdl'@(Model rs' n' _) str' jts')) <-
-    Mesh.pushRule verify msh (s0,s1)
+    Mesh.pushRule verifyString verifyMeta msh (s0,s1)
   let n01 = n - n'
       here = (++) (" [" ++ show s01 ++ "]: ")
 
@@ -168,9 +169,10 @@ pushRule verify (TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src) (s0,s1) = 
           S.each $ M.toList lossesToDelete
 
   -- <verification>
-  when verify $ do
-    let ByLoss _ im'' = ls''
-    -- TODO: add custom progress message?
+  when verifyMeta $ do
+    let ByLoss fn _ = ls
+        ByLoss _ im'' = ls''
+    -- TODO: progress bar
     (ByLoss _ imVerif) <- Joints.byLoss fn ks'' =<< Joints.fromDoubly str''
     unless (im'' == imVerif) $
       let common = IM.keysSet $
@@ -183,5 +185,3 @@ pushRule verify (TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src) (s0,s1) = 
   -- </verification>
 
   return (s01, TrainMesh msh'' bp'' ls'' src'')
-  where
-    ByLoss fn _ = ls

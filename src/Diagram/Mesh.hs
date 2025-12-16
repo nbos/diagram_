@@ -7,6 +7,7 @@ import Control.Monad.Primitive (PrimMonad(PrimState))
 import Data.Word (Word8)
 import Data.Maybe
 import Data.Bifunctor
+import qualified Data.List as L
 import qualified Data.Map.Strict as M
 import qualified Data.IntSet as IS
 
@@ -53,10 +54,30 @@ fromStream n as = do
                             S.splitAt n as
   return (Mesh mdl str jts, rest)
 
+validateString :: PrimMonad m => Mesh m -> a -> m a
+validateString (Mesh (Model rs _ _) str _) a = do
+  ss <- D.toList str
+  let as = fmap fromEnum $ R.extension rs `concatMap` ss
+      ss' = R.subst rs as -- revReduce
+      ss'' = L.foldl' (flip id) as $
+             zipWith R.subst1 (R.toList rs) [256..]
+
+  when (ss'' /= ss') $
+    error $ "Discrepancy between revReduce algorithm and 1-by-1 substitution:\n"
+    ++ "revReduce:\n" ++ show ss'
+    ++ "\nsubst1:\n" ++ show ss''
+
+  when (ss' /= ss) $
+    error $ "Error in construction order:\n"
+    ++ "String is:\n" ++ show ss
+    ++ "\nShould be:\n" ++ show ss'
+
+  return a
+
 -- | Add a rule, rewrite, refill, with progress bars
-pushRule :: (PrimMonad m, MonadIO m) =>
-            Bool -> Mesh m -> (Sym,Sym) -> m (Sym, (Joints, Joints), Mesh m)
-pushRule verify (Mesh mdl str jts) (s0,s1) = do
+pushRule :: (PrimMonad m, MonadIO m) => Bool -> Bool ->
+            Mesh m -> (Sym,Sym) -> m (Sym, (Joints, Joints), Mesh m)
+pushRule verifyString verifyModel (Mesh mdl str jts) (s0,s1) = do
   let (n01, i01s) = second IS.toList $
                     fromMaybe (error $ "not a candidate: " ++ show (s0,s1)) $
                     M.lookup (s0,s1) jts
@@ -74,10 +95,14 @@ pushRule verify (Mesh mdl str jts) (s0,s1) = do
           withPB n01 (here "Modifying string in place") $
           S.each i01s
 
+  let msh' = Mesh mdl' str' jts'
+
   -- TODO: move to --verify-model
   -- <verification>
-  when verify $ do
+  when verifyString $ validateString msh' ()
+  when verifyModel $ do
     let Model rs' n' _ = mdl'
+    -- TODO: progress bar
     (Model _ nVerif ksVerif, _) <- Mdl.fromStream rs' $ D.stream str'
     unless (n' == nVerif) $
       error $ "Error in the maintenance of symbol count: " ++ show n'
@@ -91,4 +116,4 @@ pushRule verify (Mesh mdl str jts) (s0,s1) = do
         ++ "\nShould be:\n" ++ show v1
   -- </verification>
 
-  return (s01, (am, rm), Mesh mdl' str' jts')
+  return (s01, (am, rm), msh')

@@ -31,7 +31,7 @@ import Diagram.Information
 import Diagram.Util
 
 -- | Count and location of each candidate/joint symbol in the string
-type Joints = Map (Sym,Sym) (Int,IntSet)
+type Joints = Map (Sym,Sym) (Int, IntSet)
 
 type Doubly s = D.Doubly MVector s Sym
 -- | Construction using the indices of the doubly-linked list
