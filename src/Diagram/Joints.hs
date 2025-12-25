@@ -43,11 +43,15 @@ fromDoubly = fmap fst
 fromStream :: Monad m => Stream (Of (Index,Sym)) m r -> m (Joints, r)
 fromStream = fromStream_ M.empty
 
+-- | fromStream worker function without a previous (context)
+-- index-symbol pair
 fromStream_ :: Monad m => Joints -> Stream (Of (Index,Sym)) m r -> m (Joints, r)
 fromStream_ m0 iss0 = (S.next iss0 >>=) $ \case
   Left r -> return (m0, r)
   Right (i0s0,iss0') -> fromStreamOdd_ i0s0 m0 iss0'
 
+-- | fromStream worker function given a previous (context) index-symbol
+-- pair
 fromStreamOdd_ :: Monad m => (Index, Sym) -> Joints ->
                   Stream (Of (Index, Sym)) m r -> m (Joints, r)
 fromStreamOdd_ (i0,s0) !m iss = (S.next iss >>=) $ \case

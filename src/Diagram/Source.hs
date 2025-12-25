@@ -62,15 +62,20 @@ new rs as = do
 
 pushRule :: PrimMonad m => (Sym, Sym) -> Sym -> Source m r -> m (Source m r)
 pushRule s0s1@(s0,s1) s01 (Source buf bufExt rsm exts tries as) = do
+  -- traceShowM ""
+  -- traceShowM ("pushed",s0s1,s01)
+  -- str <- Dly.toList buf
+  -- traceShowM ("buf was",str)
   buf' <- S.foldM_ (Dly.subst2 s01) (return buf) return $
           Dly.streamKeysOfJoint buf s0s1
+  -- str' <- Dly.toList buf'
+  -- traceShowM ("now is",str')
   ext0 <- Dyn.read exts s0
   ext1 <- Dyn.read exts s1
   let ext01 = ext0 <> ext1
   exts' <- Dyn.push exts ext01
   tries' <- Dyn.push tries Trie.empty
   Dyn.modify tries' (Trie.insert ext1 s01) s0
-  -- (traceShow ("pushed",s0s1,s01) $ traceShowId rsm')
   return $ Source buf' bufExt rsm' exts' tries' as
   where
     rsm' = M.insert s0s1 s01 rsm
@@ -87,22 +92,35 @@ splitAt rs = go
                  Left r -> return $ src{ atoms = return r }
                  Right (s, src') -> S.yield s >> go (n-1) src'
 
+cons :: PrimMonad m => Sym -> Source m r -> m (Source m r)
+cons s (Source buf bufExt rsm exts tries as) = do
+  buf' <- Dly.cons s buf
+  ext <- Dyn.read exts s
+  let bufExt' = ext <> bufExt
+  return $ Source buf' bufExt' rsm exts tries as
+
 -- | Produce a fully constructed symbol from the source, if not yet
 -- empty, given a rule set equal or superset of any rule set previously
 -- given to the source.
 next :: forall m r. PrimMonad m =>
         Rules -> Source m r -> m (Either r (Sym, Source m r))
 next rs (Source buf bufExt rsm exts tries as) = do
+  -- str <- Dly.toList buf
+  -- traceShowM ""
+  -- traceShowM ("buf",str)
+  -- traceShowM ("bufExt", BS.unpack bufExt, bufExt)
   robust <- (S.uncons (Dly.stream buf) >>=) $ \case
     Nothing -> return False
     Just (s0, ss) -> do
       len0 <- BS.length <$> Dyn.read exts s0
       checkRobust maxBound s0 ss $ BS.drop len0 bufExt
+  -- traceShowM ("robust", robust)
 
   -- pop a symbol
   if robust then (Dly.tryUncons buf >>=) $ \case
       Nothing -> error "impossible"
       Just (s,buf') -> do
+        -- traceShowM ("emitted",s)
         len <- BS.length <$> Dyn.read exts s
         let bufExt' = BS.drop len bufExt
         return $ Right (s, Source buf' bufExt' rsm exts tries as)

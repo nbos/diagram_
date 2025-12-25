@@ -77,6 +77,9 @@ full _ = False
 headKey :: Doubly v s a -> Maybe Index
 headKey (Doubly mi0 _ _ _ _) = mi0
 
+headElem :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe a)
+headElem l = mapM (read l) (headKey l)
+
 lastKey :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m (Maybe Index)
 lastKey (Doubly Nothing _ _ _ _) = return Nothing
 lastKey (Doubly (Just i0) _ _ prevs _) = Just <$> MV.read prevs i0
