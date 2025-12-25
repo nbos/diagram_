@@ -75,9 +75,9 @@ validateString (Mesh (Model rs _ _) str _) a = do
   return a
 
 -- | Add a rule, rewrite, refill, with progress bars
-pushRule :: (PrimMonad m, MonadIO m) => Bool -> Bool ->
+pushRule :: (PrimMonad m, MonadIO m) => Bool ->
             Mesh m -> (Sym,Sym) -> m (Sym, (Joints, Joints), Mesh m)
-pushRule verifyString verifyModel (Mesh mdl str jts) (s0,s1) = do
+pushRule verifyModel (Mesh mdl str jts) (s0,s1) = do
   let (n01, i01s) = second IS.toList $
                     fromMaybe (error $ "not a candidate: " ++ show (s0,s1)) $
                     M.lookup (s0,s1) jts
@@ -99,7 +99,6 @@ pushRule verifyString verifyModel (Mesh mdl str jts) (s0,s1) = do
 
   -- TODO: move to --verify-model
   -- <verification>
-  when verifyString $ validateString msh' ()
   when verifyModel $ do
     let Model rs' n' _ = mdl'
     -- TODO: progress bar

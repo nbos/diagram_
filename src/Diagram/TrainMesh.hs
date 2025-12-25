@@ -83,7 +83,7 @@ pushRule :: (PrimMonad m, MonadIO m) => Bool -> Bool ->
 pushRule verifyString verifyMeta tm (s0,s1) = do
   let TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src = tm
   (s01, (am, rm), msh'@(Mesh mdl'@(Model rs' n' _) str' jts')) <-
-    Mesh.pushRule verifyString verifyMeta msh (s0,s1)
+    Mesh.pushRule verifyMeta msh (s0,s1)
   let n01 = n - n'
       here = (++) (" [" ++ show s01 ++ "]: ")
 
@@ -125,7 +125,7 @@ pushRule verifyString verifyMeta tm (s0,s1) = do
         S.scanM (\(_,l) s -> first (,s) . fromJust <$> D.trySnoc l s) -- snoc
                 (return (error "_|_", str')) return $
         withPB n01 (here "Filling mesh back to capacity") $
-        -- S.map traceShowId $
+        -- S.map (\s -> traceShow (s, "emitted") (trace "\n" s)) $
         S.yield s_0 >> ss
       --
 
@@ -136,6 +136,8 @@ pushRule verifyString verifyMeta tm (s0,s1) = do
       let jts'' = jts' `Joints.union` am'
           msh'' = Mesh mdl'' str'' jts''
       return (observed, am', TrainMesh msh'' bp' ls src'')
+
+  when verifyString $ Mesh.validateString msh' ()
 
   -- :: delete and re-insert in loss map :: --
   let affectedSymbols = IS.insert s0 $

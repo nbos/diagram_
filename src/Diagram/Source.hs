@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections, LambdaCase #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE InstanceSigs #-}
 module Diagram.Source (module Diagram.Source) where
 
@@ -8,10 +8,9 @@ import Control.Monad.Primitive (PrimMonad(PrimState))
 
 import Data.Word (Word8)
 import Data.Maybe
+import Data.Tuple.Extra
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as IM
 import Data.Trie (Trie)
 import qualified Data.Trie as Trie
 import Data.ByteString (ByteString)
@@ -23,19 +22,22 @@ import Diagram.Streaming () -- PrimMonad instance
 
 import Diagram.Rules (Rules,Sym)
 import qualified Diagram.Rules as R
-import qualified Diagram.Doubly as D
+import qualified Diagram.Doubly as Dly
+import qualified Diagram.Dynamic as Dyn
 import Diagram.Joints (Doubly)
 import Diagram.Util
 
--- | Wrapper around a stream of bytes from source file to optimally
--- produce fully constructed symbols upon request.
+type DynVec m = Dyn.BoxedVec m
+
+-- | Wrapper around a stream of bytes from source file to produce fully
+-- constructed symbols on request.
 data Source m r = Source {
-  buffer :: !(Doubly (PrimState m)),  -- ^ Partial constructions
-  bufExt :: !ByteString,              -- ^ Extension of the buffer
-  fwdRules :: !(Map (Sym,Sym) Sym),   -- ^ Construction rules (s0,s1) -> s01
-  extensions :: !(IntMap ByteString), -- ^ Extensions by symbol
-  extTrie :: !(Trie ()),              -- ^ Extensions trie
-  atoms :: !(Stream (Of Word8) m r)   -- ^ Raw bytes from source file
+  buffer :: !(Doubly (PrimState m)),    -- ^ Partial constructions
+  bufExtension :: !ByteString,          -- ^ Extension of the buffer
+  fwdRules :: !(Map (Sym,Sym) Sym),     -- ^ Construction rules (s0,s1) -> s01
+  extensions :: !(DynVec m ByteString), -- ^ Extensions of each symbol
+  partners :: !(DynVec m (Trie Sym)),   -- ^ Constructions by right partner
+  atoms :: !(Stream (Of Word8) m r)     -- ^ Raw bytes from source file
 }
 
 instance Monad m => Functor (Source m) where
@@ -44,27 +46,34 @@ instance Monad m => Functor (Source m) where
 
 new :: PrimMonad m => Rules -> Stream (Of Word8) m r -> m (Source m r)
 new rs as = do
-  buf <- D.new 10
-  return $ Source buf bs rsm im trie as
+  buf <- Dly.new 8 -- arbitrary starting size
+  exts <- Dyn.fromList $ BS.pack . R.extension rs <$> symbols
+  tries <- Dyn.replicate numSymbols Trie.empty
+  forM_ [256..numSymbols-1] $ \s -> do
+    let (s0,s1) = rs R.! s
+        ext = BS.pack $ R.extension rs s1
+    Dyn.modify tries (Trie.insert ext s) s0
+  return $ Source buf bufExt rsm exts tries as
   where
     numSymbols = R.numSymbols rs
-    bs = BS.empty
+    symbols = [0..numSymbols-1]
+    bufExt = BS.empty
     rsm = R.toMap rs
-    exts = BS.pack . R.extension rs <$> [0..numSymbols-1]
-    im = IM.fromDistinctAscList $ zip [0..numSymbols-1] exts
-    trie = Trie.fromList $ (,()) <$> exts
 
 pushRule :: PrimMonad m => (Sym, Sym) -> Sym -> Source m r -> m (Source m r)
-pushRule s0s1 s01 (Source buf bs rsm im trie as) = do
-  buf' <- S.foldM_ (D.subst2 s01) (return buf) return $
-          D.streamKeysOfJoint buf s0s1
+pushRule s0s1@(s0,s1) s01 (Source buf bufExt rsm exts tries as) = do
+  buf' <- S.foldM_ (Dly.subst2 s01) (return buf) return $
+          Dly.streamKeysOfJoint buf s0s1
+  ext0 <- Dyn.read exts s0
+  ext1 <- Dyn.read exts s1
+  let ext01 = ext0 <> ext1
+  exts' <- Dyn.push exts ext01
+  tries' <- Dyn.push tries Trie.empty
+  Dyn.modify tries' (Trie.insert ext1 s01) s0
   -- (traceShow ("pushed",s0s1,s01) $ traceShowId rsm')
-  return $ Source buf' bs rsm' im' trie' as
+  return $ Source buf' bufExt rsm' exts' tries' as
   where
     rsm' = M.insert s0s1 s01 rsm
-    e01 = (im IM.! fst s0s1) <> (im IM.! snd s0s1)
-    im' = IM.insert s01 e01 im
-    trie' = Trie.insert e01 () trie
 
 -- | Produce a stream of at most `n` fully constructed symbols from the
 -- source, given a rule set equal or superset of any rule set previously
@@ -83,37 +92,71 @@ splitAt rs = go
 -- given to the source.
 next :: forall m r. PrimMonad m =>
         Rules -> Source m r -> m (Either r (Sym, Source m r))
-next rs (Source buf bs rsm im trie as)
-  -- -- | traceShow (bs,notAPrefix,"length exts:",length exts) False = undefined
-  | notAPrefix = (D.tryUncons buf >>=) $ \case -- pop a symbol
+next rs (Source buf bufExt rsm exts tries as) = do
+  robust <- (S.uncons (Dly.stream buf) >>=) $ \case
+    Nothing -> return False
+    Just (s0, ss) -> do
+      len0 <- BS.length <$> Dyn.read exts s0
+      checkRobust maxBound s0 ss $ BS.drop len0 bufExt
+
+  -- pop a symbol
+  if robust then (Dly.tryUncons buf >>=) $ \case
       Nothing -> error "impossible"
-      Just (s,buf') -> return $ Right (s, Source buf' bs' rsm im trie as)
-          where bs' = BS.drop (BS.length $ im IM.! s) bs
+      Just (s,buf') -> do
+        len <- BS.length <$> Dyn.read exts s
+        let bufExt' = BS.drop len bufExt
+        return $ Right (s, Source buf' bufExt' rsm exts tries as)
 
-  | otherwise = (S.next as >>=) $ \case -- read/append an atom
-      Left r -> (D.tryUncons buf >>=) $ \case -- pop a symbol
-        Nothing -> return $ Left r
-        Just (s,buf') -> return $ Right (s, Source buf' bs' rsm im trie as')
-          where bs' = BS.drop (BS.length $ im IM.! s) bs
-                as' = return r
+  -- read/append an atom + reduce
+    else (S.next as >>=) $ \case
+    Left r -> (Dly.tryUncons buf >>=) $ \case -- pop a symbol
+      Nothing -> return $ Left r
+      Just (s, buf') -> do
+        len <- BS.length <$> Dyn.read exts s
+        let bufExt' = BS.drop len bufExt
+            as' = return r
+        return $ Right (s, Source buf' bufExt' rsm exts tries as')
 
-      Right (a, as') -> do
-        buf' <- snocReduce buf $ fromEnum a -- Word8 -> Int
-        let bs' = BS.snoc bs a
-        next rs $ Source buf' bs' rsm im trie as' -- rec
+    Right (a, as') -> do
+      buf' <- snocReduce buf $ fromEnum a -- Word8 -> Int
+      let bufExt' = BS.snoc bufExt a
+      next rs $ Source buf' bufExt' rsm exts tries as' -- rec
 
   where
-    exts = Trie.keys $ Trie.submap bs trie
-    notAPrefix = not (BS.null bs) -- short circuit in case exts not lazy
-                 && (null exts || exts == [bs])
+    checkRobust :: Sym -> Sym -> Stream (Of Sym) m q -> ByteString -> m Bool
+    checkRobust upperBound s0 ss ssExt  = do
+      let sufs = R.suffixes rs s0
+          bounds = upperBound : (min upperBound <$> init sufs)
+      tries0 <- forM sufs $ Dyn.read tries
+      -- that there exists a construction that is compatible with and
+      -- extends further than the current buffer is proof the head is
+      -- not robust
+      let longer = concat $ zipWith (filter . (>)) bounds $
+                   fmap (Trie.elems . Trie.submap ssExt) tries0
+      if not (null longer) then return False else do
+        -- if no construction is compatible with the current buffer
+        -- (shorter or longer), then the symbol (and all those
+        -- preceeding) is robust
+        let shorter = concat $ zipWith (filter . (>)) bounds $
+                      fmap (fmap snd3 . flip Trie.matches ssExt) tries0
+        if null shorter then return True else (S.uncons ss >>=) $ \case
+          -- otherwise if a certain head of the buffer could be a
+          -- construction, we check if none of the following symbols are
+          -- robust, with progress on the precedence
+          Nothing -> return True
+          Just (s0', ss') -> do
+            let upperBound' = maximum shorter
+            len0 <- BS.length <$> Dyn.read exts s0'
+            let ssExt' = BS.drop len0 ssExt
+            checkRobust upperBound' s0' ss' ssExt'
 
     snocReduce :: Doubly (PrimState m) -> Int -> m (Doubly (PrimState m))
-    snocReduce ss s1 = ( -- traceShow ("snocReduce", s1, "on") (D.traceShow ss) >>
-                         D.tryUnsnoc ss >>=) $ \case
-      Nothing -> snd <$> D.snoc ss s1
+    snocReduce ss s1 = ( -- traceShow ("snocReduce", s1, "on") (Dly.traceShow ss) >>
+                         Dly.tryUnsnoc ss >>=) $ \case
+      Nothing -> snd <$> Dly.snoc ss s1
       Just (ss',s0)
-        | null constrs -> snd <$> (D.snoc ss' s0
-                                   >>= flip D.snoc s1 . snd)
+        | null constrs -> snd <$> (Dly.snoc ss' s0
+                                   >>= flip Dly.snoc s1 . snd)
         | otherwise -> foldM snocReduce ss' recip01
                        >>= flip snocReduce s01
         where

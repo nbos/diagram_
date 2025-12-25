@@ -14,7 +14,7 @@ fast:
 debug:
 	@echo "Building debug version with profiling..."
 	cabal build --enable-profiling --ghc-options="-O0 -fprof-auto -fprof-cafs -rtsopts"
-	@echo "Debug build complete. Run with: make run-debug"
+	@echo "Debug build complete."
 
 # Release build with full optimization
 .PHONY: release

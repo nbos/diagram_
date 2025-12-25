@@ -36,7 +36,7 @@ data Model s = Model {
 ------------------
 
 empty :: PrimMonad m => m (Model (PrimState m))
-empty = Model R.empty 0 <$> U.unsafeThaw (U.replicate 256 0)
+empty = Model R.empty 0 <$> MV.replicate 256 0
 
 incCounts :: PrimMonad m =>
              Model (PrimState m) -> [Sym] -> m (Model (PrimState m))
@@ -55,7 +55,7 @@ decCount (Model rs n ks) s = MV.modify ks (+(-1)) s
 -- | Reconstruction from rule set and fully constructed symbol string
 fromList :: PrimMonad m => Rules -> [Sym] -> m (Model (PrimState m))
 fromList rs ss = do
-  ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
+  ks <- MV.replicate (R.numSymbols rs) 0
   forM_ ss $ MV.modify ks (+1)
   n <- MV.foldl' (+) 0 ks
   return $ Model rs n ks
@@ -64,7 +64,7 @@ fromList rs ss = do
 fromStream :: PrimMonad m => Rules -> Stream (Of Sym) m r ->
                              m (Model (PrimState m), r)
 fromStream rs ss = do
-  ks <- U.unsafeThaw $ U.replicate (R.numSymbols rs) 0
+  ks <- MV.replicate (R.numSymbols rs) 0
   r <- S.effects $ S.mapM (MV.modify ks (+1)) ss
   n <- MV.foldl' (+) 0 ks
   return (Model rs n ks, r)
@@ -103,7 +103,7 @@ encodeParts rs ss = (rsCode, nCode, ksCode, ssCode)
     numSymbols = R.numSymbols rs
     (sks,ssCode) = Comb.encodeMultisetPermutation ss
     ks = V.toList $ runST $ do -- add bins with zero counts
-      mutks <- U.unsafeThaw $ U.replicate numSymbols 0
+      mutks <- MV.replicate numSymbols 0
       forM_ sks $ uncurry $ MV.write mutks
       U.unsafeFreeze mutks
     ((n,_),ksCode) = Comb.encodeMultiset ks

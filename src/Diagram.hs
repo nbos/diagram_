@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, TypeApplications, LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables, TypeApplications #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Diagram (module Diagram) where
@@ -205,7 +205,8 @@ main = do
                             / fromIntegral (evalLen0 * 8) :: Double
                 evalFactor = recip evalRatio
             -- : push rule :
-            (_, _, emsh') <- Mesh.pushRule verifyConstr verifyMeta emsh (s0,s1)
+            (_, _, emsh') <- Mesh.pushRule verifyMeta emsh (s0,s1)
+            when verifyConstr $ Mesh.validateString emsh' ()
             return (evalFactor, evalCodeLen, Just emsh')
 
         -- :: Print stats to CSV :: --
