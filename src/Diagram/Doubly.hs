@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables, FlexibleContexts #-}
 {-# LANGUAGE LambdaCase, TupleSections #-}
 -- | Doubly-linked list with random access
 module Diagram.Doubly (module Diagram.Doubly) where
@@ -11,6 +12,8 @@ import Control.Monad.Primitive (PrimMonad(PrimState))
 import Data.Maybe
 import qualified Data.IntSet as IS
 import qualified Data.Vector.Unboxed as U
+import Data.Vector.Generic (Vector, Mutable)
+import qualified Data.Vector.Generic as V
 import Data.Vector.Generic.Mutable (MVector)
 import qualified Data.Vector.Generic.Mutable as MV
 
@@ -25,44 +28,9 @@ data Doubly v s a = Doubly
   !(U.MVector s Index) -- ^ previous indexes
   !(U.MVector s Index) -- ^ next indexes
 
-checkIntegrity :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> r -> m r
-checkIntegrity l@(Doubly _ free elems _ _) r = do
-  fwd <- S.toList_ $ streamKeys l
-  bwd <- S.toList_ $ revStreamKeys l
-  when (reverse bwd /= fwd) $ err $ "BWD keys is not the reverse of FWD keys:\n"
-    ++ "FWD: " ++ show fwd ++ "\nBWD: " ++ show bwd
-
-  let keySet = IS.fromList fwd
-      freeSet = IS.fromList free
-      indexSet = IS.fromList [0..MV.length elems - 1]
-
-  when (IS.size keySet /= length fwd) $ err $ "Key set contains duplicates: "
-    ++ show fwd
-  when (IS.size freeSet /= length free) $ err $ "Free set contains duplicates: "
-    ++ show free
-  when (IS.union keySet freeSet /= indexSet) $ err $
-    "Some keys missing absent from both key and free set: "
-    ++ show (IS.toList $ (indexSet IS.\\ keySet) IS.\\ freeSet)
-  unless (IS.null $ IS.intersection keySet freeSet) $ err $
-    "Key and free set intersect: " ++ show (IS.intersection keySet freeSet)
-
-  -- verify value initialization
-  as <- S.toList_ $ stream l
-  return $ foldr ((.) . seq) id as r
-
-  where err = error . (++) "Doubly.checkIntegrity: "
-
--- | Monadic traceShow of the list
-traceShow :: (Show a, PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m ()
-traceShow l = toList l >>= flip Trace.traceShow (return ())
-
 -- | Allocate a new list of the given size with undefined values
 new :: (PrimMonad m, MVector v a) => Int -> m (Doubly v (PrimState m) a)
-new sz = do
-  elems <- MV.new sz
-  prevs <- U.unsafeThaw (U.fromList ((sz-1):[0..sz-2]))
-  nexts <- U.unsafeThaw (U.fromList ([1..sz-1]++[0]))
-  return $ Doubly Nothing [0..sz-1] elems prevs nexts
+new sz = Doubly Nothing [0..sz-1] <$> MV.new sz <*> MV.new sz <*> MV.new sz
 
 capacity :: MVector v a => Doubly v s a -> Int
 capacity (Doubly _ _ elems _ _) = MV.length elems
@@ -106,12 +74,10 @@ growBy :: (PrimMonad m, MVector v a) =>
           Int -> Doubly v (PrimState m) a -> m (Doubly v (PrimState m) a)
 growBy n (Doubly mi0 free elems prevs nexts) = do
   let len = MV.length elems
-      len' = len + n
-      free' = free ++ [len..len'-1]
-  elems' <- MV.grow elems n
-  nexts' <- MV.grow nexts n
-  prevs' <- MV.grow prevs n
-  return $ Doubly mi0 free' elems' prevs' nexts'
+  Doubly mi0 (free ++ [len..len+n-1])
+    <$> MV.grow elems n
+    <*> MV.grow prevs n
+    <*> MV.grow nexts n
 
 -- | Double the capacity of the list
 grow :: (PrimMonad m, MVector v a) =>
@@ -119,30 +85,47 @@ grow :: (PrimMonad m, MVector v a) =>
 grow l = growBy (max 1 $ capacity l) l
 
 -- | Construct a doubly-linked list from a singly-linked list
-fromList :: (PrimMonad m, MVector v a) => [a] -> m (Doubly v (PrimState m) a)
-fromList as = do
-  let len = length as
-  elems <- MV.new len
-  forM_ (zip [0..] as) $ uncurry $ MV.write elems
-  prevs <- U.unsafeThaw (U.fromList ((len-1):[0..len-2]))
-  nexts <- U.unsafeThaw (U.fromList ([1..len-1]++[0]))
-  return $ Doubly (Just 0) [] elems prevs nexts
+fromList :: forall m v a. (PrimMonad m, Vector v a, MVector (Mutable v) a) =>
+            [a] -> m (Doubly (Mutable v) (PrimState m) a)
+fromList as = Doubly (Just 0) [] <$> V.unsafeThaw elems
+              <*> U.unsafeThaw prevs
+              <*> U.unsafeThaw nexts
+  where
+    elems = V.fromList as
+    len = V.length elems
+    prevs = U.fromList $ (len-1):[0..len-2]
+    nexts = U.fromList $ [1..len-1]++[0]
 
 -- | Construct a doubly-linked list from a stream of at most `n`
 -- elements
-fromStream :: (PrimMonad m, MVector v a) => Int -> Stream (Of a) m r ->
+fromStream :: (Show a, PrimMonad m, MVector v a) => Int -> Stream (Of a) m r ->
               m (Doubly v (PrimState m) a, r)
 fromStream n str = do
   elems <- MV.new n
-  rest <- S.effects $ S.mapM (uncurry $ MV.write elems) $
-          S.zip (S.enumFrom 0) $
-          S.splitAt n str
-  prevs <- U.unsafeThaw (U.fromList ((n-1):[0..n-2]))
-  nexts <- U.unsafeThaw (U.fromList ([1..n-1]++[0]))
-  (<$> S.next rest) $ \case
-    Left r -> (Doubly (Just 0) [] elems prevs nexts, r)
+  (len :> rest) <- S.effects $ S.mapM (uncurry $ MV.write elems) $
+                   S.zip (S.enumFrom 0) $
+                   S.length $ S.copy $ -- count how many we take
+                   S.splitAt n str -- take max `n`
+
+  r <- (<$> S.next rest) $ \case
+    Left r -> r
     Right _ -> error $ "Doubly.fromStream: Given stream contains more than "
                ++ show n ++ " elements"
+
+  let mi0 | len == 0 = Nothing
+          | otherwise = Just 0
+      free = [len..n-1]
+
+  prevs <- MV.new n
+  nexts <- MV.new n
+  when (n > 0) $ do
+    MV.write prevs 0 (len-1)
+    MV.write nexts (len-1) 0
+    forM_ [1..len-1] $ \i -> do
+      MV.write prevs i (i-1)
+      MV.write nexts (i-1) i
+
+  return (Doubly mi0 free elems prevs nexts, r)
 
 -- | Read the doubly-linked list into a singly-linked list. Use toStream
 -- to not @sequence@ the reads.Applicative
@@ -387,3 +370,38 @@ revStreamKeysFrom (Doubly (Just i0) _ _ prevs _) = go
   where go i = do S.yield i
                   prv <- lift $ MV.read prevs i
                   if prv == i0 then S.yield i0 else go prv -- cont.
+
+---------------
+-- DEBUGGING --
+---------------
+
+checkIntegrity :: (PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> r -> m r
+checkIntegrity l@(Doubly _ free elems _ _) r = do
+  fwd <- S.toList_ $ streamKeys l
+  bwd <- S.toList_ $ revStreamKeys l
+  when (reverse bwd /= fwd) $ err $ "BWD keys is not the reverse of FWD keys:\n"
+    ++ "FWD: " ++ show fwd ++ "\nBWD: " ++ show bwd
+
+  let keySet = IS.fromList fwd
+      freeSet = IS.fromList free
+      indexSet = IS.fromList [0..MV.length elems - 1]
+
+  when (IS.size keySet /= length fwd) $ err $ "Key set contains duplicates: "
+    ++ show fwd
+  when (IS.size freeSet /= length free) $ err $ "Free set contains duplicates: "
+    ++ show free
+  when (IS.union keySet freeSet /= indexSet) $ err $
+    "Some keys missing absent from both key and free set: "
+    ++ show (IS.toList $ (indexSet IS.\\ keySet) IS.\\ freeSet)
+  unless (IS.null $ IS.intersection keySet freeSet) $ err $
+    "Key and free set intersect: " ++ show (IS.intersection keySet freeSet)
+
+  -- verify value initialization
+  as <- S.toList_ $ stream l
+  return $ foldr ((.) . seq) id as r
+
+  where err = error . (++) "Doubly.checkIntegrity: "
+
+-- | Monadic traceShow of the list
+traceShow :: (Show a, PrimMonad m, MVector v a) => Doubly v (PrimState m) a -> m ()
+traceShow l = toList l >>= flip Trace.traceShow (return ())
