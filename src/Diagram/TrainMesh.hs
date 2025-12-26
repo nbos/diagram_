@@ -1,4 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase, TupleSections #-}
 module Diagram.TrainMesh (module Diagram.TrainMesh) where
 
 import Control.Monad
@@ -24,7 +25,7 @@ import Diagram.Joints (LossFn,ByLoss(..))
 import qualified Diagram.Joints as Joints
 import Diagram.Mesh (Mesh(Mesh))
 import qualified Diagram.Mesh as Mesh
-import Diagram.Source (Source)
+import Diagram.Source (Source(..))
 import qualified Diagram.Source as Source
 import Diagram.Progress
 import Diagram.Util
@@ -67,13 +68,36 @@ minLoss (TrainMesh (Mesh (Model rs n _) _ _) _ ls _) =
 pushRule :: (PrimMonad m, MonadIO m) => Bool -> Bool ->
             TrainMesh m r -> (Sym,Sym) -> m (Sym, TrainMesh m r)
 pushRule verifyString verifyMeta tm (s0,s1) = do
-  let TrainMesh msh@(Mesh (Model _ n ks) _ jts) bp ls src = tm
+  let TrainMesh msh0@(Mesh (Model rs _ _) _ jts0) bp ls src0 = tm
+      (n01, _) = jts0 M.! (s0,s1)
 
-  (s01, (am, rm), msh'@(Mesh (Model rs' n' _) _ jts')) <-
+  -- guard for special case when a (s0,s1) crosses Mesh-Source, we
+  -- always keep at least 1 free slot in the mesh and push s1 there
+  -- before calling Mesh.pushRule
+  (specialCase, msh@(Mesh (Model _ _ ks) _ jts), src) <- (Mesh.last msh0 >>=) $ \case
+    Nothing -> error "Empty mesh (impossible)"
+    Just s0' | s0' /= s0 -> return (False, msh0, src0) -- not the case
+    _else -> (Source.next rs src0 >>=) $ \case
+      Left r -> return (False, msh0, src0{ atoms = return r }) -- not the case
+      Right (hd, tl)
+        | hd /= s1 -> (False, msh0,) <$> Source.cons hd tl -- not the case
+        | otherwise -> do
+            par <- Mesh.checkParity $ Mesh.string msh0
+            if s0 == s1 && not par then (False, msh0,)
+                                        <$> Source.cons hd tl -- not the case
+              else do -- is the case
+              when (Mesh.full msh0) $ error "Full mesh (impossible)"
+              (msh0', _, _, _) <- Mesh.append msh0 (S.yield hd) -- snoc
+              return (True, msh0', tl)
+
+  let n01' | specialCase = n01 - 1
+           | otherwise = n01
+  --
+
+  (s01, (am, rm), msh'@(Mesh (Model rs' _ _) _ jts')) <-
     Mesh.pushRule verifyMeta msh (s0,s1)
 
-  let n01 = n - n'
-      here = (++) (" [" ++ show s01 ++ "]: ")
+  let here = (++) (" [" ++ show s01 ++ "]: ")
 
   bp' <- MV.grow bp 1 -- (cloned)
   MV.write bp' s01 Set.empty
@@ -89,7 +113,7 @@ pushRule verifyString verifyMeta tm (s0,s1) = do
   src' <- Source.pushRule (s0,s1) s01 src
   -- :: fill mesh with new symbols :: --
   (msh''@(Mesh mdl'' str'' jts''), am', observed, src'') <-
-    Mesh.append msh' (Source.splitAt rs' n01 src')
+    Mesh.append msh' (Source.splitAt rs' n01' src')
 
   forM_ (M.keys $ am' `M.difference` jts') $ \jt -> do
     MV.modify bp' (Set.insert jt) $ fst jt
@@ -108,18 +132,30 @@ pushRule verifyString verifyMeta tm (s0,s1) = do
   let lossesToDelete = M.restrictKeys jts   affectedJoints
       lossesToInsert = M.restrictKeys jts'' affectedJoints
 
-      deleteLoss im (jt,(k01,_)) = do
-        k0 <- MV.read ks $ fst jt
-        k1 <- MV.read ks $ snd jt
-        let key = (k01,(k0,k1))
-        return $ Joints.deleteLoss key jt im
+      -- special case changes the counts vector before we get a chance
+      -- to read the losses to delete, so we add a correction (ugly)
+      deleteLoss im (jt,(k01,_))
+        | specialCase = do
+            k0 <- MV.read ks $ fst jt
+            k1 <- MV.read ks $ snd jt
+            let k0' | fst jt == s1 = k0 - 1
+                    | otherwise = k0
+                k1' | snd jt == s1 = k1 - 1
+                    | otherwise = k1
+                k01' | jt == (s0,s1) = k01 - 1
+                     | otherwise = k01
+            return $ Joints.deleteLoss (k01',(k0',k1')) jt im
+
+        | otherwise = do
+            k0 <- MV.read ks $ fst jt
+            k1 <- MV.read ks $ snd jt
+            return $ Joints.deleteLoss (k01,(k0,k1)) jt im
 
       Model _ _ ks'' = mdl''
       insertLoss im (jt,(k01,_)) = do
         k0 <- MV.read ks'' $ fst jt
         k1 <- MV.read ks'' $ snd jt
-        let key' = (k01,(k0,k1))
-        return $ Joints.insertLoss key' jt im
+        return $ Joints.insertLoss (k01,(k0,k1)) jt im
 
   ls' <- flip2 (S.foldM_ insertLoss) return
          ( withPB (M.size lossesToInsert) (here "Inserting losses") $

@@ -85,7 +85,7 @@ grow :: (PrimMonad m, MVector v a) =>
 grow l = growBy (max 1 $ capacity l) l
 
 -- | Construct a doubly-linked list from a singly-linked list
-fromList :: forall m v a. (PrimMonad m, Vector v a, MVector (Mutable v) a) =>
+fromList :: (PrimMonad m, Vector v a, MVector (Mutable v) a) =>
             [a] -> m (Doubly (Mutable v) (PrimState m) a)
 fromList as = Doubly (Just 0) [] <$> V.unsafeThaw elems
               <*> U.unsafeThaw prevs

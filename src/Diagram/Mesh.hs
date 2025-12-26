@@ -50,7 +50,8 @@ fromStream :: (PrimMonad m, MonadIO m) =>
 fromStream n as = do
   let rs = R.empty
   (mdl,(str,(jts,rest))) <- Mdl.fromStream rs $
-                            D.fromStream n $ S.copy $
+                            -- +1 for TrainMesh.pushRule special case
+                            D.fromStream (n+1) $ S.copy $
                             Joints.fromStream $
                             S.zip (S.enumFrom 0) $ S.copy $
                             S.map fromEnum $
